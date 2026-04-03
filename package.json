@@ -1,9 +1,10 @@
 {
-  "name": "claude-code-token-meter",
+  "name": "agent-token-meter",
   "version": "1.0.0",
-  "description": "Zero-dependency burn-rate monitor for Claude Code with threshold hooks. Context tax, /clear savings, workflow phases, acceleration, compaction ETA, and automatic nudges at 50/75/90% context fill.",
+  "description": "Zero-dependency burn-rate monitor for AI coding agents. Context tax, workflow phases, acceleration, compaction ETA, threshold hooks, and automatic nudges at 50/75/90% context fill. Currently supports Claude Code.",
   "type": "module",
   "bin": {
+    "agent-token-meter": "./token-meter.mjs",
     "claude-code-token-meter": "./token-meter.mjs"
   },
   "scripts": {
@@ -17,8 +18,12 @@
     "LICENSE"
   ],
   "keywords": [
+    "agent",
+    "ai-coding",
     "claude",
     "claude-code",
+    "cursor",
+    "windsurf",
     "tokens",
     "monitoring",
     "burn-rate",
@@ -29,7 +34,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/albertdobmeyer/claude-code-token-meter"
+    "url": "https://github.com/albertdobmeyer/agent-token-meter"
   },
   "engines": {
     "node": ">=18.0.0"

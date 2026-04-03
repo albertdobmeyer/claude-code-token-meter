@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 /**
- * Claude Code Token Meter — zero-dependency, single-file burn-rate monitor.
+ * Agent Token Meter — zero-dependency burn-rate monitor for AI coding agents.
  *
- * Reads Claude Code's local JSONL session logs and displays live token
- * usage with burn-rate acceleration and compaction prediction.
+ * Reads session logs and displays live token usage with burn-rate
+ * acceleration, compaction prediction, and workflow advisor.
+ *
+ * Currently supports: Claude Code. More agents planned.
  *
  * Usage:
- *   npx claude-code-token-meter          # auto-detect active session
- *   npx claude-code-token-meter --all    # summary of all sessions
- *   npx claude-code-token-meter --help   # show help
+ *   npx agent-token-meter              # auto-detect agent and session
+ *   npx agent-token-meter --all        # summary of all sessions
+ *   npx agent-token-meter --help       # show help
  */
 
 import fs from "fs";
@@ -19,38 +21,63 @@ import { fileURLToPath } from "url";
 const VERSION = "1.0.0";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// ── Pricing ($/M tokens) ──────────────────────────────────────────────
-const PRICING = {
-  "claude-opus-4-6":       { input: 15,   output: 75,  cacheWrite: 18.75, cacheRead: 1.5  },
-  "claude-opus-4-5":       { input: 15,   output: 75,  cacheWrite: 18.75, cacheRead: 1.5  },
-  "claude-sonnet-4-6":     { input: 3,    output: 15,  cacheWrite: 3.75,  cacheRead: 0.3  },
-  "claude-sonnet-4-5":     { input: 3,    output: 15,  cacheWrite: 3.75,  cacheRead: 0.3  },
-  "claude-haiku-4-5":      { input: 0.8,  output: 4,   cacheWrite: 1,     cacheRead: 0.08 },
-};
-const DEFAULT_PRICING = PRICING["claude-opus-4-6"];
+// ── Agent Profiles ───────────────────────────────────────────────────
+// Each profile defines everything agent-specific. To add a new agent,
+// add an entry here with the same shape.
 
-// ── External provider pricing ($/M tokens) ───────────────────────────
+const AGENTS = {
+  "claude-code": {
+    id: "claude-code",
+    name: "Claude Code",
+    sessionDir: () => path.join(os.homedir(), ".claude", "projects"),
+    configDir: () => path.join(os.homedir(), ".claude"),
+    configFile: "token-meter.json",
+    pricing: {
+      "claude-opus-4-6":   { input: 15,   output: 75,  cacheWrite: 18.75, cacheRead: 1.5  },
+      "claude-opus-4-5":   { input: 15,   output: 75,  cacheWrite: 18.75, cacheRead: 1.5  },
+      "claude-sonnet-4-6": { input: 3,    output: 15,  cacheWrite: 3.75,  cacheRead: 0.3  },
+      "claude-sonnet-4-5": { input: 3,    output: 15,  cacheWrite: 3.75,  cacheRead: 0.3  },
+      "claude-haiku-4-5":  { input: 0.8,  output: 4,   cacheWrite: 1,     cacheRead: 0.08 },
+    },
+    defaultPricing: { input: 15, output: 75, cacheWrite: 18.75, cacheRead: 1.5 },
+    contextLimits: {
+      "claude-opus-4-6":   1_000_000,
+      "claude-opus-4-5":   1_000_000,
+      "claude-sonnet-4-6": 1_000_000,
+      "claude-sonnet-4-5":   200_000,
+      "claude-haiku-4-5":    200_000,
+    },
+    defaultContextLimit: 200_000,
+    commands: { clear: "/clear", compact: "/compact" },
+    hook: {
+      supported: true,
+      settingsPath: () => path.join(os.homedir(), ".claude", "settings.json"),
+      hookDir: () => path.join(os.homedir(), ".claude", "hooks"),
+      hookEvent: "PostToolUse",
+      hookFileName: "token-meter-hook.mjs",
+      stateFile: "token-meter-hook-state.json",
+    },
+    detect: () => {
+      try { return fs.existsSync(path.join(os.homedir(), ".claude", "projects")); }
+      catch { return false; }
+    },
+  },
+};
+
+// ── External provider pricing (cross-agent comparisons) ──────────────
 const EXTERNAL_PROVIDERS = {
   "kimi-k2.5":        { input: 0.6,  output: 3.0,  cacheWrite: 0.6,  cacheRead: 0.15 },
   "kimi-k2-thinking": { input: 0.6,  output: 2.5,  cacheWrite: 0.6,  cacheRead: 0.15 },
-};
-
-const CONTEXT_LIMITS = {
-  "claude-opus-4-6":   1_000_000,
-  "claude-opus-4-5":   1_000_000,
-  "claude-sonnet-4-6": 1_000_000,
-  "claude-sonnet-4-5":   200_000,
-  "claude-haiku-4-5":    200_000,
 };
 const EXTERNAL_CONTEXT_LIMITS = {
   "kimi-k2.5":        262_144,
   "kimi-k2-thinking": 262_144,
 };
-const DEFAULT_CONTEXT_LIMIT = 200_000;
+
+// ── Constants ────────────────────────────────────────────────────────
 const COMPACT_BUFFER = 33_000;
-const HANDOFF_SIZE = 2_000;       // estimated tokens for a plan/handoff file
-const CLEAR_LOOKAHEAD = 20;       // project savings over this many future calls
-const CONFIG_PATH = path.join(os.homedir(), ".claude", "token-meter.json");
+const HANDOFF_SIZE = 2_000;
+const CLEAR_LOOKAHEAD = 20;
 const DEFAULT_COMPARE = ["claude-sonnet-4-6", "kimi-k2.5"];
 
 // ── ANSI ──────────────────────────────────────────────────────────────
@@ -67,20 +94,14 @@ const BG_RED = "\x1b[41m";
 const CLR_SCR = "\x1b[2J\x1b[H";
 
 // ── Workflow phases ───────────────────────────────────────────────────
-// Thresholds are based on context overhead as % of usable context.
-// Overhead = current context - session baseline (system prompt + tools).
 const PHASES = [
-  { maxPct: 10,  name: "EXPLORE",    color: GREEN,   advice: "Context is cheap. Explore, plan, read broadly." },
-  { maxPct: 25,  name: "BUILD",      color: CYAN,    advice: "Productive zone. Context is earning its keep." },
-  { maxPct: 45,  name: "HANDOFF",    color: YELLOW,  advice: "Write a plan file soon: \"save our plan to plan.md\"" },
-  { maxPct: 100, name: "/CLEAR",     color: RED,     advice: "Write handoff, then /clear. Reload with the plan file." },
+  { maxPct: 10,  name: "EXPLORE",  color: GREEN,   advice: "Context is cheap. Explore, plan, read broadly." },
+  { maxPct: 25,  name: "BUILD",    color: CYAN,    advice: "Productive zone. Context is earning its keep." },
+  { maxPct: 45,  name: "HANDOFF",  color: YELLOW,  advice: "Write a plan file soon: \"save our plan to plan.md\"" },
+  { maxPct: 100, name: "RESET",    color: RED,     advice: "Write handoff, then {{clear}}. Reload with the plan file." },
 ];
 
 // ── Helpers ───────────────────────────────────────────────────────────
-function claudeDir() {
-  return path.join(os.homedir(), ".claude");
-}
-
 function fmtTokens(n) {
   if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
   if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
@@ -108,18 +129,66 @@ function bar(pct, width = 30) {
   return `${color}${"█".repeat(filled)}${DIM}${"░".repeat(empty)}${RESET}`;
 }
 
+// ── Agent resolution ─────────────────────────────────────────────────
+function resolveAgent(args) {
+  // 1. Explicit --agent flag
+  const agentIdx = args.indexOf("--agent");
+  if (agentIdx >= 0 && agentIdx + 1 < args.length) {
+    const id = args[agentIdx + 1];
+    if (!AGENTS[id]) {
+      console.error(`${RED}Unknown agent: ${id}${RESET}`);
+      console.error(`${DIM}Supported: ${Object.keys(AGENTS).join(", ")}${RESET}`);
+      process.exit(1);
+    }
+    return AGENTS[id];
+  }
+
+  // 2. Infer from positional file path
+  const positional = args.filter(a => !a.startsWith("--"));
+  if (positional.length > 0) {
+    const fp = positional[0].toLowerCase();
+    for (const profile of Object.values(AGENTS)) {
+      if (fp.includes(`.${profile.id.split("-")[0]}`)) return profile;
+    }
+  }
+
+  // 3. Auto-detect
+  for (const profile of Object.values(AGENTS)) {
+    if (profile.detect()) return profile;
+  }
+
+  // 4. No agent found
+  console.error(`${RED}No supported agent detected.${RESET}`);
+  console.error(`${DIM}Supported agents: ${Object.values(AGENTS).map(a => a.name).join(", ")}${RESET}`);
+  console.error(`${DIM}Use --agent <id> to specify manually.${RESET}`);
+  process.exit(1);
+}
+
+function renderAgents() {
+  console.log(`\n${BOLD}Supported Agents${RESET}\n`);
+  console.log(`  ${"Agent".padEnd(20)} ${"Status".padEnd(12)} Data Directory`);
+  console.log(`  ${DIM}${"─".repeat(60)}${RESET}`);
+  for (const p of Object.values(AGENTS)) {
+    const detected = p.detect();
+    const status = detected ? `${GREEN}detected${RESET}` : `${DIM}not found${RESET}`;
+    console.log(`  ${p.name.padEnd(20)} ${status}${" ".repeat(Math.max(0, 12 - (detected ? 8 : 9)))} ${DIM}${p.sessionDir()}${RESET}`);
+  }
+  console.log();
+}
+
 // ── Config & provider resolution ─────────────────────────────────────
-function loadConfig() {
+function loadConfig(profile) {
   try {
-    return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
+    const configPath = path.join(profile.configDir(), profile.configFile);
+    return JSON.parse(fs.readFileSync(configPath, "utf8"));
   } catch {
     return {};
   }
 }
 
-function resolveConfig(config) {
-  const allPricing = { ...PRICING, ...EXTERNAL_PROVIDERS };
-  const allLimits = { ...CONTEXT_LIMITS, ...EXTERNAL_CONTEXT_LIMITS };
+function resolveConfig(config, profile) {
+  const allPricing = { ...profile.pricing, ...EXTERNAL_PROVIDERS };
+  const allLimits = { ...profile.contextLimits, ...EXTERNAL_CONTEXT_LIMITS };
   if (config.providers) {
     for (const [k, v] of Object.entries(config.providers)) {
       if (v.input != null && v.output != null) allPricing[k] = v;
@@ -129,6 +198,8 @@ function resolveConfig(config) {
   return {
     allPricing,
     allLimits,
+    defaultPricing: profile.defaultPricing,
+    defaultContextLimit: profile.defaultContextLimit,
     compare: config.compare || DEFAULT_COMPARE,
     labels: Object.fromEntries(
       Object.entries(config.providers || {})
@@ -138,20 +209,20 @@ function resolveConfig(config) {
   };
 }
 
-function findPricing(model, allPricing) {
-  if (allPricing[model]) return allPricing[model];
-  for (const key of Object.keys(allPricing)) {
-    if (model.startsWith(key)) return allPricing[key];
+function findPricing(model, rc) {
+  if (rc.allPricing[model]) return rc.allPricing[model];
+  for (const key of Object.keys(rc.allPricing)) {
+    if (model.startsWith(key)) return rc.allPricing[key];
   }
-  return DEFAULT_PRICING;
+  return rc.defaultPricing;
 }
 
-function findContextLimit(model, allLimits) {
-  if (allLimits[model]) return allLimits[model];
-  for (const key of Object.keys(allLimits)) {
-    if (model.startsWith(key)) return allLimits[key];
+function findContextLimit(model, rc) {
+  if (rc.allLimits[model]) return rc.allLimits[model];
+  for (const key of Object.keys(rc.allLimits)) {
+    if (model.startsWith(key)) return rc.allLimits[key];
   }
-  return DEFAULT_CONTEXT_LIMIT;
+  return rc.defaultContextLimit;
 }
 
 function providerLabel(key, labels) {
@@ -162,8 +233,8 @@ function providerLabel(key, labels) {
 }
 
 // ── Session discovery ─────────────────────────────────────────────────
-function findSessions(projectFilter) {
-  const projectsDir = path.join(claudeDir(), "projects");
+function findSessions(projectFilter, profile) {
+  const projectsDir = profile.sessionDir();
   const results = [];
 
   if (!fs.existsSync(projectsDir)) return results;
@@ -279,9 +350,9 @@ function computeMetrics(session, rc) {
   const { turns, compactions, model } = session;
   if (turns.length === 0) return null;
 
-  const contextLimit = findContextLimit(model, rc.allLimits);
+  const contextLimit = findContextLimit(model, rc);
   const usableContext = contextLimit - COMPACT_BUFFER;
-  const pricing = findPricing(model, rc.allPricing);
+  const pricing = findPricing(model, rc);
 
   let totalInput = 0, totalOutput = 0, totalCacheCreate = 0, totalCacheRead = 0, totalCost = 0;
   const turnCosts = [];
@@ -348,21 +419,14 @@ function computeMetrics(session, rc) {
   }
 
   // ── Workflow advisor ──
-  // Baseline: first turn's context size approximates system prompt + tools
   const baseline = contextSizes.length > 0 ? contextSizes[0] : 16_000;
   const overhead = Math.max(0, currentContext - baseline);
   const overheadPct = (overhead / usableContext) * 100;
-
-  // Per-call context tax: cost of carrying conversation history
-  // Most history is served from cache, so use cache read rate
   const contextTaxPerCall = (overhead / 1e6) * pricing.cacheRead;
-
-  // What a /clear would save: current overhead disappears, replaced by handoff
   const postClearContext = baseline + HANDOFF_SIZE;
   const savedPerCall = ((currentContext - postClearContext) / 1e6) * pricing.cacheRead;
   const savingsOverLookahead = savedPerCall * CLEAR_LOOKAHEAD;
 
-  // Determine workflow phase
   let phase = PHASES[PHASES.length - 1];
   for (const p of PHASES) {
     if (overheadPct <= p.maxPct) { phase = p; break; }
@@ -388,8 +452,8 @@ function computeMetrics(session, rc) {
   const comparisons = {};
   for (const name of rc.compare) {
     if (name === model) continue;
-    const p = findPricing(name, rc.allPricing);
-    if (p === DEFAULT_PRICING && !rc.allPricing[name]) continue; // unknown provider
+    const p = findPricing(name, rc);
+    if (p === rc.defaultPricing && !rc.allPricing[name]) continue;
     comparisons[name] =
       (totalInput / 1e6) * p.input +
       (totalOutput / 1e6) * p.output +
@@ -414,11 +478,9 @@ function computeMetrics(session, rc) {
     durationMs,
     lastTurn: turns[turns.length - 1],
     turnCosts, contextSizes,
-    // Workflow advisor
     baseline, overhead, overheadPct,
     contextTaxPerCall, savedPerCall, savingsOverLookahead,
     phase,
-    // New in v0.3
     projectedCostToCompact,
     cacheWriteCost, cacheReadSavings, cacheNetSavings,
     comparisons, totalThinking,
@@ -427,13 +489,14 @@ function computeMetrics(session, rc) {
 
 // ── Renderers ─────────────────────────────────────────────────────────
 
-function renderDashboard(metrics, session, rc) {
+function renderDashboard(metrics, session, rc, profile) {
   if (!metrics) {
     process.stdout.write(CLR_SCR);
     process.stdout.write(`${DIM}Waiting for session data...${RESET}\n`);
     return;
   }
   const m = metrics;
+  const cmds = profile.commands;
 
   // Burn rate label
   const burnSign = m.burnRate >= 0 ? "+" : "";
@@ -448,7 +511,7 @@ function renderDashboard(metrics, session, rc) {
   // Compaction ETA
   let compactStr;
   if (m.turnsToCompact === Infinity) compactStr = `${GREEN}no pressure${RESET}`;
-  else if (m.turnsToCompact < 10) compactStr = `${BG_RED}${WHITE}${BOLD} ~${m.turnsToCompact} calls ${RESET} ${RED}/compact now${RESET}`;
+  else if (m.turnsToCompact < 10) compactStr = `${BG_RED}${WHITE}${BOLD} ~${m.turnsToCompact} calls ${RESET} ${RED}${cmds.compact} now${RESET}`;
   else if (m.turnsToCompact < 50) compactStr = `${RED}~${m.turnsToCompact} calls${RESET}`;
   else if (m.turnsToCompact < 200) compactStr = `${YELLOW}~${m.turnsToCompact} calls${RESET}`;
   else compactStr = `${GREEN}~${m.turnsToCompact} calls${RESET}`;
@@ -460,12 +523,16 @@ function renderDashboard(metrics, session, rc) {
     compactHistory = `  ${DIM}last compaction: ${fmtTokens(c.before)} -> ${fmtTokens(c.after)} (-${fmtTokens(c.reduction)})${RESET}`;
   }
 
+  // Phase — resolve {{clear}} template
+  const phaseName = m.phase.name.replace("RESET", cmds.clear.replace("/", "").toUpperCase());
+  const phaseAdvice = m.phase.advice.replace("{{clear}}", cmds.clear);
+
   const W = 52;
   const sep = `${DIM}${"─".repeat(W)}${RESET}`;
 
   const lines = [
     "",
-    `${BOLD}${CYAN} ⚡ Claude Code Token Meter ${RESET}${DIM}v${VERSION}${RESET}`,
+    `${BOLD}${CYAN} Agent Token Meter ${RESET}${DIM}v${VERSION}${RESET}  ${DIM}(${profile.name})${RESET}`,
     sep,
     "",
     ` ${DIM}model${RESET}      ${BOLD}${m.model}${RESET}`,
@@ -491,13 +558,13 @@ function renderDashboard(metrics, session, rc) {
     "",
     sep,
     "",
-    ` ${DIM}workflow${RESET}   ${m.phase.color}${BOLD}${m.phase.name}${RESET}  ${DIM}${m.phase.advice}${RESET}`,
+    ` ${DIM}workflow${RESET}   ${m.phase.color}${BOLD}${phaseName}${RESET}  ${DIM}${phaseAdvice}${RESET}`,
     "",
     ` ${DIM}overhead${RESET}   ${fmtTokens(m.overhead)} of history  ${DIM}(baseline: ${fmtTokens(m.baseline)})${RESET}`,
     ` ${DIM}ctx tax${RESET}    ${m.contextTaxPerCall > 0.01 ? YELLOW : DIM}${fmtCost(m.contextTaxPerCall)}/call${RESET} for carrying conversation history`,
     m.savedPerCall > 0.005
-      ? ` ${DIM}/clear${RESET}     ${GREEN}saves ${fmtCost(m.savedPerCall)}/call${RESET}  ${DIM}(~${fmtCost(m.savingsOverLookahead)} over next ${CLEAR_LOOKAHEAD} calls with handoff)${RESET}`
-      : ` ${DIM}/clear${RESET}     ${DIM}no significant savings yet${RESET}`,
+      ? ` ${DIM}${cmds.clear}${RESET}${" ".repeat(Math.max(1, 10 - cmds.clear.length))}${GREEN}saves ${fmtCost(m.savedPerCall)}/call${RESET}  ${DIM}(~${fmtCost(m.savingsOverLookahead)} over next ${CLEAR_LOOKAHEAD} calls with handoff)${RESET}`
+      : ` ${DIM}${cmds.clear}${RESET}${" ".repeat(Math.max(1, 10 - cmds.clear.length))}${DIM}no significant savings yet${RESET}`,
     m.projectedCostToCompact != null
       ? ` ${DIM}projection${RESET} ${YELLOW}~${fmtCost(m.projectedCostToCompact)}${RESET} ${DIM}total by compaction (${m.turnsToCompact} more calls)${RESET}`
       : null,
@@ -513,14 +580,14 @@ function renderDashboard(metrics, session, rc) {
   process.stdout.write(lines.join("\n") + "\n");
 }
 
-function renderAllSessions(projectFilter, limit = 20, rc) {
-  const sessions = findSessions(projectFilter);
+function renderAllSessions(projectFilter, limit, rc, profile) {
+  const sessions = findSessions(projectFilter, profile);
   if (sessions.length === 0) {
     console.log(`\n${DIM}No sessions found.${RESET}\n`);
     return;
   }
 
-  console.log(`\n${BOLD}Claude Code Sessions${RESET}${projectFilter ? ` ${DIM}(filter: "${projectFilter}")${RESET}` : ""}\n`);
+  console.log(`\n${BOLD}${profile.name} Sessions${RESET}${projectFilter ? ` ${DIM}(filter: "${projectFilter}")${RESET}` : ""}\n`);
   console.log(
     `  ${DIM}${"Date".padEnd(12)}${"Context".padStart(9)}${"Turns".padStart(7)}${"Cost".padStart(9)}  ` +
     `${"Cache%".padStart(7)}  Project${RESET}`
@@ -553,34 +620,39 @@ function renderAllSessions(projectFilter, limit = 20, rc) {
   console.log(`  ${BOLD}Total: ${fmtCost(totalCost)}${RESET} across ${shown} sessions\n`);
 }
 
-function renderHelp() {
+function renderHelp(profile) {
+  const cmd = "npx agent-token-meter";
+  const cmds = profile ? profile.commands : { clear: "/clear", compact: "/compact" };
+  const configDir = profile ? profile.configDir() : "~/.claude";
   console.log(`
-${BOLD}${CYAN}Claude Code Token Meter${RESET} v${VERSION}
-Zero-dependency burn-rate monitor for Claude Code.
+${BOLD}${CYAN}Agent Token Meter${RESET} v${VERSION}
+Zero-dependency burn-rate monitor for AI coding agents.
 
 ${BOLD}Usage:${RESET}
-  npx claude-code-token-meter             Auto-detect and watch active session
-  npx claude-code-token-meter --all       List all sessions with cost summary
-  npx claude-code-token-meter --project X Filter sessions by project name
-  npx claude-code-token-meter <file>      Watch a specific .jsonl session file
+  ${cmd}                    Auto-detect agent and watch active session
+  ${cmd} --all              List all sessions with cost summary
+  ${cmd} --project X        Filter sessions by project name
+  ${cmd} <file>             Watch a specific .jsonl session file
 
 ${BOLD}Options:${RESET}
-  --all              Show all sessions summary
-  --project <name>   Filter by project name (substring match)
-  --limit <n>        Max sessions to show in --all (default: 20)
-  --install-hooks    Install threshold hooks into Claude Code
-  --uninstall-hooks  Remove threshold hooks
-  --help, -h         Show this help
-  --version, -v      Show version
+  --agent <id>         Select agent (default: auto-detect)
+  --agents             List supported agents and detection status
+  --all                Show all sessions summary
+  --project <name>     Filter by project name (substring match)
+  --limit <n>          Max sessions to show in --all (default: 20)
+  --install-hooks      Install threshold hooks (agent-specific)
+  --uninstall-hooks    Remove threshold hooks
+  --help, -h           Show this help
+  --version, -v        Show version
 
-${BOLD}Hooks (Claude integration):${RESET}
-  Threshold hooks inject a one-line nudge into Claude's context
+${BOLD}Hooks (threshold nudges):${RESET}
+  Threshold hooks inject a one-line nudge into the agent's context
   when your session crosses 50%, 75%, or 90% context fill.
   Each fires once. Compaction re-arms them. Zero tokens wasted
-  when below thresholds.
+  when below thresholds. Currently supported: Claude Code.
 
-  Install:    npx claude-code-token-meter --install-hooks
-  Uninstall:  npx claude-code-token-meter --uninstall-hooks
+  Install:    ${cmd} --install-hooks
+  Uninstall:  ${cmd} --uninstall-hooks
 
 ${BOLD}What it shows:${RESET}
   Context fill bar with percentage
@@ -591,31 +663,38 @@ ${BOLD}What it shows:${RESET}
   Cost per hour and session cost projection
   Cache ROI (net savings from prompt caching)
   Compaction history (detects when context was compacted)
-  Workflow advisor: phase, context tax, /clear savings projection
+  Workflow advisor: phase, context tax, ${cmds.clear} savings projection
 
 ${BOLD}Config:${RESET}
-  Optional: ~/.claude/token-meter.json
+  Optional: ${configDir}/token-meter.json
   Add custom providers or change the comparison list:
   { "compare": ["claude-sonnet-4-6", "kimi-k2.5"],
     "providers": { "my-llm": { "input": 1, "output": 5 } } }
 
 ${BOLD}Setup:${RESET}
-  Run in a split terminal pane alongside Claude Code.
-  It reads ~/.claude/projects/ JSONL logs (read-only).
+  Run in a split terminal pane alongside your coding agent.
+  It reads session JSONL logs (read-only).
 `);
 }
 
 // ── Hook installer ───────────────────────────────────────────────────
 
-function installHooks() {
-  const hooksDir = path.join(os.homedir(), ".claude", "hooks");
-  const hookDest = path.join(hooksDir, "token-meter-hook.mjs");
+function installHooks(profile) {
+  if (!profile.hook?.supported) {
+    console.error(`\n${RED}Hooks are not supported for ${profile.name}.${RESET}`);
+    console.error(`${DIM}Currently only Claude Code supports threshold hooks.${RESET}\n`);
+    process.exit(1);
+  }
+
+  const hk = profile.hook;
+  const hooksDir = hk.hookDir();
+  const hookDest = path.join(hooksDir, hk.hookFileName);
   const hookSrc = path.join(__dirname, "hook.mjs");
-  const settingsPath = path.join(os.homedir(), ".claude", "settings.json");
+  const settingsPath = hk.settingsPath();
 
   if (!fs.existsSync(hookSrc)) {
     console.error(`${RED}hook.mjs not found at ${hookSrc}${RESET}`);
-    console.error(`${DIM}Try reinstalling: npm install -g claude-code-token-meter${RESET}`);
+    console.error(`${DIM}Try reinstalling: npm install -g agent-token-meter${RESET}`);
     process.exit(1);
   }
 
@@ -623,55 +702,61 @@ function installHooks() {
   fs.mkdirSync(hooksDir, { recursive: true });
   fs.copyFileSync(hookSrc, hookDest);
 
-  // 2. Merge into settings.json
+  // 2. Merge into settings
   let settings = {};
   try { settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")); } catch {}
 
   if (!settings.hooks) settings.hooks = {};
-  if (!settings.hooks.PostToolUse) settings.hooks.PostToolUse = [];
+  if (!settings.hooks[hk.hookEvent]) settings.hooks[hk.hookEvent] = [];
 
   // Remove any existing token-meter hook entry
-  settings.hooks.PostToolUse = settings.hooks.PostToolUse.filter(
+  settings.hooks[hk.hookEvent] = settings.hooks[hk.hookEvent].filter(
     h => !JSON.stringify(h).includes("token-meter")
   );
 
   // Add hook — use forward slashes for bash compatibility
   const hookCmd = `node "${hookDest.replace(/\\/g, "/")}"`;
-  settings.hooks.PostToolUse.push({
+  settings.hooks[hk.hookEvent].push({
     matcher: "",
     hooks: [{ type: "command", command: hookCmd }],
   });
 
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
 
-  console.log(`\n${GREEN}✓${RESET} Token Meter hooks installed\n`);
+  console.log(`\n${GREEN}✓${RESET} Token Meter hooks installed for ${BOLD}${profile.name}${RESET}\n`);
   console.log(`  ${DIM}Hook:${RESET}     ${hookDest}`);
   console.log(`  ${DIM}Config:${RESET}   ${settingsPath}`);
-  console.log(`\n  Claude receives a one-line nudge when context crosses:`);
+  console.log(`\n  ${profile.name} receives a one-line nudge when context crosses:`);
   console.log(`    ${YELLOW}50%${RESET}  — plan a handoff point`);
-  console.log(`    ${YELLOW}75%${RESET}  — write findings to file, prepare to /clear`);
-  console.log(`    ${RED}90%${RESET}  — /clear now (shows context tax $/call)`);
+  console.log(`    ${YELLOW}75%${RESET}  — write findings to file, prepare to ${profile.commands.clear}`);
+  console.log(`    ${RED}90%${RESET}  — ${profile.commands.clear} now (shows context tax $/call)`);
   console.log(`\n  Each fires ${BOLD}once${RESET} per session. Compaction re-arms them.`);
-  console.log(`  To remove: ${CYAN}npx claude-code-token-meter --uninstall-hooks${RESET}\n`);
+  console.log(`  To remove: ${CYAN}npx agent-token-meter --uninstall-hooks${RESET}\n`);
 }
 
-function uninstallHooks() {
-  const hookDest = path.join(os.homedir(), ".claude", "hooks", "token-meter-hook.mjs");
-  const statePath = path.join(os.homedir(), ".claude", "token-meter-hook-state.json");
-  const settingsPath = path.join(os.homedir(), ".claude", "settings.json");
+function uninstallHooks(profile) {
+  if (!profile.hook?.supported) {
+    console.error(`\n${RED}Hooks are not supported for ${profile.name}.${RESET}\n`);
+    process.exit(1);
+  }
+
+  const hk = profile.hook;
+  const hookDest = path.join(hk.hookDir(), hk.hookFileName);
+  const statePath = path.join(profile.configDir(), hk.stateFile);
+  const settingsPath = hk.settingsPath();
 
   // Remove hook file and state
   try { fs.unlinkSync(hookDest); } catch {}
   try { fs.unlinkSync(statePath); } catch {}
 
-  // Remove from settings.json
+  // Remove from settings
   try {
     const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
-    if (settings.hooks?.PostToolUse) {
-      settings.hooks.PostToolUse = settings.hooks.PostToolUse.filter(
+    if (settings.hooks?.[hk.hookEvent]) {
+      settings.hooks[hk.hookEvent] = settings.hooks[hk.hookEvent].filter(
         h => !JSON.stringify(h).includes("token-meter")
       );
-      if (settings.hooks.PostToolUse.length === 0) delete settings.hooks.PostToolUse;
+      if (settings.hooks[hk.hookEvent].length === 0) delete settings.hooks[hk.hookEvent];
       if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
       fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
     }
@@ -685,7 +770,9 @@ function main() {
   const args = process.argv.slice(2);
 
   if (args.includes("--help") || args.includes("-h")) {
-    renderHelp();
+    // Help can run without a detected agent
+    const profile = Object.values(AGENTS).find(a => a.detect()) || Object.values(AGENTS)[0];
+    renderHelp(profile);
     return;
   }
 
@@ -694,13 +781,21 @@ function main() {
     return;
   }
 
+  if (args.includes("--agents")) {
+    renderAgents();
+    return;
+  }
+
+  // Resolve which agent we're monitoring
+  const profile = resolveAgent(args);
+
   if (args.includes("--install-hooks")) {
-    installHooks();
+    installHooks(profile);
     return;
   }
 
   if (args.includes("--uninstall-hooks")) {
-    uninstallHooks();
+    uninstallHooks(profile);
     return;
   }
 
@@ -719,23 +814,24 @@ function main() {
   }
 
   // Load config and resolve providers
-  const rc = resolveConfig(loadConfig());
+  const rc = resolveConfig(loadConfig(profile), profile);
 
   if (args.includes("--all")) {
-    renderAllSessions(projectFilter, limit, rc);
+    renderAllSessions(projectFilter, limit, rc, profile);
     return;
   }
 
   // Determine target file
   let targetFile;
-  const positional = args.filter(a => !a.startsWith("--") && a !== projectFilter);
+  const skipArgs = ["--agent", "--project", "--limit"];
+  const positional = args.filter((a, i) => !a.startsWith("--") && !skipArgs.includes(args[i - 1]));
   if (positional.length > 0) {
     targetFile = path.resolve(positional[0]);
   } else {
-    const sessions = findSessions(projectFilter);
+    const sessions = findSessions(projectFilter, profile);
     if (sessions.length === 0) {
-      console.error(`${RED}No Claude Code session files found.${RESET}`);
-      console.error(`${DIM}Expected logs in: ${path.join(claudeDir(), "projects")}${RESET}`);
+      console.error(`${RED}No ${profile.name} session files found.${RESET}`);
+      console.error(`${DIM}Expected logs in: ${profile.sessionDir()}${RESET}`);
       process.exit(1);
     }
     targetFile = sessions[0].path;
@@ -749,7 +845,7 @@ function main() {
   // Initial render
   let session = parseSession(targetFile);
   let metrics = computeMetrics(session, rc);
-  renderDashboard(metrics, session, rc);
+  renderDashboard(metrics, session, rc, profile);
 
   // Watch with debounce
   let timer = null;
@@ -760,7 +856,7 @@ function main() {
         try {
           session = parseSession(targetFile);
           metrics = computeMetrics(session, rc);
-          renderDashboard(metrics, session, rc);
+          renderDashboard(metrics, session, rc, profile);
         } catch { /* mid-write, skip */ }
       }, 250);
     });
@@ -772,7 +868,7 @@ function main() {
         if (newSession.turns.length !== session.turns.length) {
           session = newSession;
           metrics = computeMetrics(session, rc);
-          renderDashboard(metrics, session, rc);
+          renderDashboard(metrics, session, rc, profile);
         }
       } catch { /* skip */ }
     }, 2000);
