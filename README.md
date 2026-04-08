@@ -6,6 +6,8 @@ AI coding agents bill by tokens, and conversations accumulate cost **quadratical
 
 Agent Token Meter watches your coding agent's session and shows you the burn rate, acceleration, and estimated calls until auto-compaction — so you know *when* to act, not just how much you've spent after the fact.
 
+![Agent Token Meter dashboard](agent-token-meter-terminal-screenshot.png)
+
 ```
  Agent Token Meter v1.0.0  (Claude Code)
 ────────────────────────────────────────────────────
