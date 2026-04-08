@@ -1,5 +1,7 @@
 # Agent Token Meter
 
+[![npm version](https://img.shields.io/npm/v/agent-token-meter)](https://www.npmjs.com/package/agent-token-meter) [![CI](https://github.com/albertdobmeyer/agent-token-meter/actions/workflows/ci.yml/badge.svg)](https://github.com/albertdobmeyer/agent-token-meter/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 **A speedometer for your context window.** Zero dependencies. Single file. Answers one question: *should I reset my context right now?*
 
 AI coding agents bill by tokens, and conversations accumulate cost **quadratically** — each message resends the entire history. A 100-turn conversation doesn't cost 10x more than a 10-turn conversation. It costs **50x** more. Most developers have no real-time visibility into this.
