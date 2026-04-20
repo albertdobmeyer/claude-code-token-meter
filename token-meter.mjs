@@ -18,7 +18,7 @@ import path from "path";
 import os from "os";
 import { fileURLToPath } from "url";
 
-const VERSION = "1.1.0";
+const VERSION = "1.2.0";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ── Agent Profiles ───────────────────────────────────────────────────

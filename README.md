@@ -11,7 +11,7 @@ Agent Token Meter watches your coding agent's session and shows you the burn rat
 ![Agent Token Meter dashboard](https://raw.githubusercontent.com/albertdobmeyer/agent-token-meter/main/agent-token-meter-terminal-screenshot.png)
 
 ```
- Agent Token Meter v1.1.0 · Claude Code · B--A5DS-HQ-agent-token-meter · 32891718
+ Agent Token Meter v1.2.0 · Claude Code · B--A5DS-HQ-agent-token-meter · 32891718
 ════════════════════════════════════════════════════════════
  MULTIPLIER   ×7.6 ↑        $0.52 now   $0.04 fresh
  BUILD — productive zone · context 22% · reset in ~442
@@ -160,7 +160,7 @@ The meter watches **one session at a time, scoped to your current working direct
 The dashboard header shows both the project directory name and the short session id:
 
 ```
-Agent Token Meter v1.1.0 · Claude Code · B--A5DS-HQ-agent-token-meter · 6cfb4866
+Agent Token Meter v1.2.0 · Claude Code · B--A5DS-HQ-agent-token-meter · 6cfb4866
 ```
 
 This is the primary disambiguation signal — you match the project string (with the drive letter and path segments) against your terminal's `cwd` to confirm the numbers belong to the conversation you're thinking about. The short session id is the tiebreaker if multiple terminals are open in the same project; Claude Code's `/status` command shows the same id.
