@@ -18,7 +18,7 @@ import path from "path";
 import os from "os";
 import { fileURLToPath } from "url";
 
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ── Agent Profiles ───────────────────────────────────────────────────
@@ -33,6 +33,7 @@ const AGENTS = {
     configDir: () => path.join(os.homedir(), ".claude"),
     configFile: "token-meter.json",
     pricing: {
+      "claude-opus-4-7":   { input: 15,   output: 75,  cacheWrite: 18.75, cacheRead: 1.5  },
       "claude-opus-4-6":   { input: 15,   output: 75,  cacheWrite: 18.75, cacheRead: 1.5  },
       "claude-opus-4-5":   { input: 15,   output: 75,  cacheWrite: 18.75, cacheRead: 1.5  },
       "claude-sonnet-4-6": { input: 3,    output: 15,  cacheWrite: 3.75,  cacheRead: 0.3  },
@@ -41,13 +42,14 @@ const AGENTS = {
     },
     defaultPricing: { input: 15, output: 75, cacheWrite: 18.75, cacheRead: 1.5 },
     contextLimits: {
+      "claude-opus-4-7":   1_000_000,
       "claude-opus-4-6":   1_000_000,
       "claude-opus-4-5":   1_000_000,
       "claude-sonnet-4-6": 1_000_000,
       "claude-sonnet-4-5":   200_000,
       "claude-haiku-4-5":    200_000,
     },
-    defaultContextLimit: 200_000,
+    defaultContextLimit: 1_000_000,
     commands: { clear: "/clear", compact: "/compact" },
     hook: {
       supported: true,
@@ -400,7 +402,10 @@ function computeMetrics(session, rc) {
 
   // ── Compaction ETA ──
   const remaining = usableContext - currentContext;
-  const turnsToCompact = burnRate > 0 ? Math.floor(remaining / burnRate) : Infinity;
+  const turnsToCompact = burnRate > 0
+    ? Math.max(0, Math.floor(remaining / burnRate))
+    : Infinity;
+  const overContext = currentContext > usableContext;
 
   // ── Cost rate ──
   const recentCosts = turnCosts.slice(-10);
@@ -426,6 +431,25 @@ function computeMetrics(session, rc) {
   const postClearContext = baseline + HANDOFF_SIZE;
   const savedPerCall = ((currentContext - postClearContext) / 1e6) * pricing.cacheRead;
   const savingsOverLookahead = savedPerCall * CLEAR_LOOKAHEAD;
+
+  // ── Per-call cost multiplier (current call vs fresh-conversation call) ──
+  // Cache-read dominates billing and scales linearly with context, so the
+  // context-size ratio closely approximates the $/call ratio. Keep one
+  // decimal so the user can distinguish ×1.2 (fresh) from ×1.8 (warming up).
+  const multiplier = baseline > 0 ? Math.max(1, currentContext / baseline) : 1;
+  const baselineCostPerCall = (baseline / 1e6) * pricing.cacheRead;
+
+  // ── Reset-overdue duration (when context has already exceeded usable) ──
+  let overdueMs = 0;
+  if (overContext) {
+    for (const t of turns) {
+      if (t.contextSize > usableContext) {
+        const ts = t.timestamp ? new Date(t.timestamp).getTime() : 0;
+        if (ts > 0) overdueMs = Date.now() - ts;
+        break;
+      }
+    }
+  }
 
   let phase = PHASES[PHASES.length - 1];
   for (const p of PHASES) {
@@ -480,6 +504,8 @@ function computeMetrics(session, rc) {
     turnCosts, contextSizes,
     baseline, overhead, overheadPct,
     contextTaxPerCall, savedPerCall, savingsOverLookahead,
+    multiplier, baselineCostPerCall,
+    overContext, overdueMs,
     phase,
     projectedCostToCompact,
     cacheWriteCost, cacheReadSavings, cacheNetSavings,
@@ -489,7 +515,57 @@ function computeMetrics(session, rc) {
 
 // ── Renderers ─────────────────────────────────────────────────────────
 
-function renderDashboard(metrics, session, rc, profile) {
+// ── Multiplier styling ───────────────────────────────────────────────
+// Color reflects how much more the current call costs vs. a fresh one.
+function multColor(mult) {
+  if (mult >= 4) return RED;
+  if (mult >= 3) return YELLOW;
+  return GREEN;
+}
+
+function sessionShortId(filePath) {
+  if (!filePath) return "";
+  const base = filePath.split(/[\\/]/).pop() || "";
+  return base.replace(/\.jsonl$/, "").slice(0, 8);
+}
+
+function buildPhaseBanner(m, cmds) {
+  const clearCaps = cmds.clear.replace("/", "").toUpperCase();
+  const pct = m.contextPct.toFixed(0);
+  const resetFrag = m.overContext
+    ? `${RED}${BOLD}reset overdue${m.overdueMs > 60_000 ? ` ${fmtDuration(m.overdueMs)}` : ""}${RESET}`
+    : m.turnsToCompact === Infinity
+      ? `${GREEN}no pressure${RESET}`
+      : m.turnsToCompact < 10
+        ? `${BG_RED}${WHITE}${BOLD} reset in ~${m.turnsToCompact} ${RESET}`
+        : m.turnsToCompact < 50
+          ? `${RED}reset in ~${m.turnsToCompact}${RESET}`
+          : m.turnsToCompact < 200
+            ? `${YELLOW}reset in ~${m.turnsToCompact}${RESET}`
+            : `${DIM}reset in ~${m.turnsToCompact}${RESET}`;
+
+  const contextFrag = m.overContext
+    ? `${RED}${BOLD}context ${pct}% OVER${RESET}`
+    : `${DIM}context ${pct}%${RESET}`;
+
+  switch (m.phase.name) {
+    case "EXPLORE":
+      return `${GREEN}${BOLD}EXPLORE${RESET} ${DIM}—${RESET} context is cheap · ${contextFrag} · ${resetFrag}`;
+    case "BUILD":
+      return `${CYAN}${BOLD}BUILD${RESET} ${DIM}—${RESET} productive zone · ${contextFrag} · ${resetFrag}`;
+    case "HANDOFF":
+      return `${YELLOW}${BOLD}HANDOFF${RESET} ${DIM}—${RESET} plan a handoff file · ${contextFrag} · ${resetFrag}`;
+    case "RESET":
+    default: {
+      const head = m.overContext
+        ? `${RED}${BOLD}⚠ HANDOFF AND ${clearCaps}${RESET}`
+        : `${RED}${BOLD}⚠ ${clearCaps}${RESET}`;
+      return `${head} ${DIM}—${RESET} ${contextFrag} · ${resetFrag}`;
+    }
+  }
+}
+
+function renderDashboard(metrics, session, rc, profile, hud = {}) {
   if (!metrics) {
     process.stdout.write(CLR_SCR);
     process.stdout.write(`${DIM}Waiting for session data...${RESET}\n`);
@@ -498,83 +574,85 @@ function renderDashboard(metrics, session, rc, profile) {
   const m = metrics;
   const cmds = profile.commands;
 
-  // Burn rate label
-  const burnSign = m.burnRate >= 0 ? "+" : "";
-  const burnStr = `${burnSign}${fmtTokens(Math.round(m.burnRate))}/call`;
+  // Acceleration arrow
+  let accelArrow = "";
+  if (m.acceleration > 100) accelArrow = `${RED}↑${RESET}`;
+  else if (m.acceleration < -100) accelArrow = `${GREEN}↓${RESET}`;
+  else if (m.turnCount >= 10) accelArrow = `${DIM}=${RESET}`;
 
-  // Acceleration indicator
-  let accelStr = "";
-  if (m.acceleration > 100) accelStr = `  ${RED}accelerating${RESET}`;
-  else if (m.acceleration < -100) accelStr = `  ${GREEN}decelerating${RESET}`;
-  else if (m.turnCount >= 10) accelStr = `  ${DIM}steady${RESET}`;
+  // Multiplier styling — one decimal, color-banded, red bg at ≥5
+  const mc = multColor(m.multiplier);
+  const multText = `×${m.multiplier.toFixed(1)}`;
+  const multStyled = m.multiplier >= 5
+    ? `${BG_RED}${WHITE}${BOLD} ${multText} ${RESET}`
+    : `${mc}${BOLD}${multText}${RESET}`;
 
-  // Compaction ETA
-  let compactStr;
-  if (m.turnsToCompact === Infinity) compactStr = `${GREEN}no pressure${RESET}`;
-  else if (m.turnsToCompact < 10) compactStr = `${BG_RED}${WHITE}${BOLD} ~${m.turnsToCompact} calls ${RESET} ${RED}${cmds.compact} now${RESET}`;
-  else if (m.turnsToCompact < 50) compactStr = `${RED}~${m.turnsToCompact} calls${RESET}`;
-  else if (m.turnsToCompact < 200) compactStr = `${YELLOW}~${m.turnsToCompact} calls${RESET}`;
-  else compactStr = `${GREEN}~${m.turnsToCompact} calls${RESET}`;
+  // Header — just agent + short session id, no mangled project path
+  const shortId = sessionShortId(session?.filePath);
+  const sessionTag = shortId ? ` ${DIM}·${RESET} ${DIM}${shortId}${RESET}` : "";
+  const header = `${BOLD}${CYAN} Agent Token Meter ${RESET}${DIM}v${VERSION}${RESET} ${DIM}·${RESET} ${DIM}${profile.name}${RESET}${sessionTag}`;
 
-  // Compaction history
-  let compactHistory = "";
-  if (m.compactions.length > 0) {
-    const c = m.compactions[m.compactions.length - 1];
-    compactHistory = `  ${DIM}last compaction: ${fmtTokens(c.before)} -> ${fmtTokens(c.after)} (-${fmtTokens(c.reduction)})${RESET}`;
-  }
+  // Optional transient notice (e.g., auto-follow switched sessions)
+  const noticeLine = hud.notice ? ` ${CYAN}${hud.notice}${RESET}` : null;
 
-  // Phase — resolve {{clear}} template
-  const phaseName = m.phase.name.replace("RESET", cmds.clear.replace("/", "").toUpperCase());
-  const phaseAdvice = m.phase.advice.replace("{{clear}}", cmds.clear);
+  const W = 60;
+  const sepHeavy = `${DIM}${"═".repeat(W)}${RESET}`;
+  const sepLight = `${DIM}${"─".repeat(W)}${RESET}`;
 
-  const W = 52;
-  const sep = `${DIM}${"─".repeat(W)}${RESET}`;
+  // NOW section
+  const contextPctStr = `${m.contextPct.toFixed(0)}%`;
+  const contextColor = m.overContext ? RED + BOLD : BOLD;
+  const contextLine = ` ${DIM}context${RESET}      ${fmtTokens(m.currentContext)} / ${fmtTokens(m.usableContext)}         ${contextColor}${contextPctStr}${RESET}`;
+  const burnLine = ` ${DIM}burn${RESET}         ${MAGENTA}${m.burnRate >= 0 ? "+" : ""}${Math.round(m.burnRate)}${RESET} ${DIM}tok/call${RESET}${accelArrow ? ` ${accelArrow}` : ""}`;
+  const lastTurnLine = ` ${DIM}last turn${RESET}    ${DIM}${fmtTokens(m.lastTurn.contextSize)} in · ${fmtTokens(m.lastTurn.output)} out · ${m.lastTurn.stopReason}${RESET}`;
+
+  // IF YOU CLEAR section — only when there's meaningful savings
+  const clearCaps = cmds.clear.replace("/", "").toUpperCase();
+  const clearSection = m.savedPerCall > 0.005 ? [
+    sepLight,
+    ` ${DIM}IF YOU ${clearCaps}${RESET}`,
+    ` ${DIM}per call${RESET}     ${GREEN}save ${fmtCost(m.savedPerCall)}${RESET}`,
+    ` ${DIM}next ${CLEAR_LOOKAHEAD}${RESET}      ${GREEN}save ~${fmtCost(m.savingsOverLookahead)}${RESET}`,
+    ` ${DIM}steps${RESET}        ${DIM}write handoff → ${cmds.clear} → reload with plan${RESET}`,
+  ] : null;
+
+  // SESSION section
+  const sessionParts = [`${BOLD}${GREEN}${fmtCost(m.totalCost)}${RESET}`, `${m.userTurnCount} turns`];
+  if (m.durationMs > 0) sessionParts.push(fmtDuration(m.durationMs));
+  if (m.costPerHour > 0) sessionParts.push(`${fmtCost(m.costPerHour)}/hr`);
+  const spendLine = ` ${DIM}spend${RESET}        ${sessionParts.map((p, i) => i === 0 ? p : DIM + p + RESET).join(` ${DIM}·${RESET} `)}`;
+
+  const cacheParts = [`${m.cacheHitRate.toFixed(0)}% hit`];
+  if (m.cacheNetSavings > 0.01) cacheParts.push(`saved ${GREEN}${fmtCost(m.cacheNetSavings)}${RESET}`);
+  cacheParts.push(`${fmtTokens(m.totalBilledInput)} in`);
+  cacheParts.push(`${fmtTokens(m.totalOutput)} out`);
+  const cacheLine = ` ${DIM}cache${RESET}        ${DIM}${cacheParts.join(" · ")}${RESET}`;
+
+  const altLine = Object.keys(m.comparisons).length > 0
+    ? ` ${DIM}alt models${RESET}   ${DIM}${Object.entries(m.comparisons).slice(0, 3).map(([k, v]) => `${providerLabel(k, rc.labels)} ${fmtCost(v)}`).join("   ")}${RESET}`
+    : null;
 
   const lines = [
     "",
-    `${BOLD}${CYAN} Agent Token Meter ${RESET}${DIM}v${VERSION}${RESET}  ${DIM}(${profile.name})${RESET}`,
-    sep,
-    "",
-    ` ${DIM}model${RESET}      ${BOLD}${m.model}${RESET}`,
-    ` ${DIM}session${RESET}    ${m.userTurnCount} user turns  ${DIM}(${m.turnCount} API calls)${RESET}${m.durationMs > 0 ? `  ${DIM}${fmtDuration(m.durationMs)}${RESET}` : ""}`,
-    "",
-    ` ${DIM}context${RESET}    ${bar(m.contextPct)} ${BOLD}${m.contextPct.toFixed(1)}%${RESET}`,
-    `            ${DIM}${fmtTokens(m.currentContext)} / ${fmtTokens(m.usableContext)} usable  (${fmtTokens(m.contextLimit)} limit - ${fmtTokens(COMPACT_BUFFER)} buffer)${RESET}`,
-    "",
-    ` ${DIM}burn${RESET}       ${MAGENTA}${burnStr}${RESET}${accelStr}`,
-    ` ${DIM}compact${RESET}    ${compactStr}`,
-    compactHistory ? compactHistory : null,
-    "",
-    ` ${DIM}tokens${RESET}     in: ${fmtTokens(m.totalBilledInput)}   out: ${fmtTokens(m.totalOutput)}${m.totalThinking > 0 ? `   ${MAGENTA}thinking: ${fmtTokens(m.totalThinking)}${RESET}` : ""}`,
-    `            ${DIM}cache hit: ${fmtTokens(m.totalCacheRead)} (${m.cacheHitRate.toFixed(0)}%)  write: ${fmtTokens(m.totalCacheCreate)}  uncached: ${fmtTokens(m.totalInput)}${RESET}`,
-    m.cacheNetSavings > 0.01
-      ? `            ${DIM}cache ROI: ${GREEN}+${fmtCost(m.cacheNetSavings)} net savings${RESET} ${DIM}(write: ${fmtCost(m.cacheWriteCost)}, saved: ${fmtCost(m.cacheReadSavings)})${RESET}`
-      : null,
-    "",
-    ` ${DIM}cost${RESET}       ${BOLD}${GREEN}${fmtCost(m.totalCost)}${RESET} total   ${DIM}~${fmtCost(m.avgCostPerTurn)}/call${RESET}${m.costPerHour > 0 ? `   ${DIM}~${fmtCost(m.costPerHour)}/hr${RESET}` : ""}`,
-    Object.keys(m.comparisons).length > 0
-      ? `            ${DIM}${Object.entries(m.comparisons).slice(0, 3).map(([k, v]) => `${providerLabel(k, rc.labels)}: ${fmtCost(v)}`).join("  ")}${RESET}`
-      : null,
-    "",
-    sep,
-    "",
-    ` ${DIM}workflow${RESET}   ${m.phase.color}${BOLD}${phaseName}${RESET}  ${DIM}${phaseAdvice}${RESET}`,
-    "",
-    ` ${DIM}overhead${RESET}   ${fmtTokens(m.overhead)} of history  ${DIM}(baseline: ${fmtTokens(m.baseline)})${RESET}`,
-    ` ${DIM}ctx tax${RESET}    ${m.contextTaxPerCall > 0.01 ? YELLOW : DIM}${fmtCost(m.contextTaxPerCall)}/call${RESET} for carrying conversation history`,
-    m.savedPerCall > 0.005
-      ? ` ${DIM}${cmds.clear}${RESET}${" ".repeat(Math.max(1, 10 - cmds.clear.length))}${GREEN}saves ${fmtCost(m.savedPerCall)}/call${RESET}  ${DIM}(~${fmtCost(m.savingsOverLookahead)} over next ${CLEAR_LOOKAHEAD} calls with handoff)${RESET}`
-      : ` ${DIM}${cmds.clear}${RESET}${" ".repeat(Math.max(1, 10 - cmds.clear.length))}${DIM}no significant savings yet${RESET}`,
-    m.projectedCostToCompact != null
-      ? ` ${DIM}projection${RESET} ${YELLOW}~${fmtCost(m.projectedCostToCompact)}${RESET} ${DIM}total by compaction (${m.turnsToCompact} more calls)${RESET}`
-      : null,
-    "",
-    sep,
-    ` ${DIM}last call${RESET}  ctx: ${fmtTokens(m.lastTurn.contextSize)}  out: ${fmtTokens(m.lastTurn.output)}  ${DIM}${m.lastTurn.stopReason}${RESET}`,
-    sep,
-    "",
-    `${DIM} Watching for changes... (Ctrl+C to exit)${RESET}`,
-  ].filter(l => l !== null);
+    header,
+    noticeLine,
+    sepHeavy,
+    ` ${DIM}MULTIPLIER${RESET}   ${multStyled}${accelArrow ? " " + accelArrow : ""}        ${BOLD}${fmtCost(m.avgCostPerTurn)}${RESET} ${DIM}now${RESET}   ${DIM}${fmtCost(m.baselineCostPerCall)} fresh${RESET}`,
+    ` ${buildPhaseBanner(m, cmds)}`,
+    sepHeavy,
+    ` ${DIM}NOW${RESET}`,
+    contextLine,
+    burnLine,
+    lastTurnLine,
+    ...(clearSection || []),
+    sepLight,
+    ` ${DIM}SESSION${RESET}`,
+    spendLine,
+    cacheLine,
+    altLine,
+    sepHeavy,
+    `${DIM} Watching · Ctrl+C to exit${RESET}`,
+  ].filter(l => l != null);
 
   process.stdout.write(CLR_SCR);
   process.stdout.write(lines.join("\n") + "\n");
@@ -638,12 +716,21 @@ ${BOLD}Options:${RESET}
   --agent <id>         Select agent (default: auto-detect)
   --agents             List supported agents and detection status
   --all                Show all sessions summary
+  --sessions           List sessions active in the last 10 min
+  --session <id|path>  Watch a specific session (disables auto-follow)
+  --no-follow          Pin to initial session; don't auto-switch
   --project <name>     Filter by project name (substring match)
   --limit <n>          Max sessions to show in --all (default: 20)
   --install-hooks      Install threshold hooks (agent-specific)
   --uninstall-hooks    Remove threshold hooks
   --help, -h           Show this help
   --version, -v        Show version
+
+${BOLD}Multi-instance:${RESET}
+  By default the meter auto-follows the most recently active session.
+  If you switch to a different ${profile ? profile.name : "agent"} terminal and work there
+  for 30s+, the meter switches with you. Use --no-follow to pin,
+  or --session <id> to lock to a specific one.
 
 ${BOLD}Hooks (threshold nudges):${RESET}
   Threshold hooks inject a one-line nudge into the agent's context
@@ -813,6 +900,13 @@ function main() {
     limit = parseInt(args[limIdx + 1], 10) || 20;
   }
 
+  // Parse --session (explicit id or path; disables auto-follow)
+  let sessionArg = null;
+  const sessIdx = args.indexOf("--session");
+  if (sessIdx >= 0 && sessIdx + 1 < args.length) {
+    sessionArg = args[sessIdx + 1];
+  }
+
   // Load config and resolve providers
   const rc = resolveConfig(loadConfig(profile), profile);
 
@@ -821,11 +915,23 @@ function main() {
     return;
   }
 
-  // Determine target file
+  if (args.includes("--sessions")) {
+    renderActiveSessions(profile, rc);
+    return;
+  }
+
+  // Determine target file and whether to auto-follow
   let targetFile;
-  const skipArgs = ["--agent", "--project", "--limit"];
+  let followMode = !args.includes("--no-follow");
+  const skipArgs = ["--agent", "--project", "--limit", "--session"];
   const positional = args.filter((a, i) => !a.startsWith("--") && !skipArgs.includes(args[i - 1]));
-  if (positional.length > 0) {
+
+  if (sessionArg) {
+    // Explicit --session disables auto-follow
+    followMode = false;
+    targetFile = resolveSessionArg(sessionArg, profile);
+  } else if (positional.length > 0) {
+    followMode = false;
     targetFile = path.resolve(positional[0]);
   } else {
     const sessions = findSessions(projectFilter, profile);
@@ -843,42 +949,142 @@ function main() {
   }
 
   // Initial render
-  let session = parseSession(targetFile);
+  let currentFile = targetFile;
+  let session = parseSession(currentFile);
   let metrics = computeMetrics(session, rc);
-  renderDashboard(metrics, session, rc, profile);
+  let lastLocalChange = Date.now();
+  let hud = {};
+  let noticeTimer = null;
+  renderDashboard(metrics, session, rc, profile, hud);
 
-  // Watch with debounce
-  let timer = null;
-  try {
-    fs.watch(targetFile, () => {
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(() => {
+  const rerender = () => {
+    try {
+      session = parseSession(currentFile);
+      metrics = computeMetrics(session, rc);
+      renderDashboard(metrics, session, rc, profile, hud);
+    } catch { /* mid-write, skip */ }
+  };
+
+  const showNotice = (text, ms = 6000) => {
+    hud = { notice: text };
+    if (noticeTimer) clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => { hud = {}; rerender(); }, ms);
+  };
+
+  // Watch current file
+  let watcher = null;
+  let pollTimer = null;
+  const attachWatcher = () => {
+    if (watcher) { try { watcher.close(); } catch {} watcher = null; }
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    let debounce = null;
+    try {
+      watcher = fs.watch(currentFile, () => {
+        lastLocalChange = Date.now();
+        if (debounce) clearTimeout(debounce);
+        debounce = setTimeout(rerender, 250);
+      });
+    } catch {
+      // fs.watch unavailable — poll
+      let lastCount = session.turns.length;
+      pollTimer = setInterval(() => {
         try {
-          session = parseSession(targetFile);
-          metrics = computeMetrics(session, rc);
-          renderDashboard(metrics, session, rc, profile);
-        } catch { /* mid-write, skip */ }
-      }, 250);
-    });
-  } catch {
-    // fs.watch not available — fall back to polling
-    setInterval(() => {
+          const ns = parseSession(currentFile);
+          if (ns.turns.length !== lastCount) {
+            lastCount = ns.turns.length;
+            lastLocalChange = Date.now();
+            rerender();
+          }
+        } catch { /* skip */ }
+      }, 2000);
+    }
+  };
+  attachWatcher();
+
+  // Auto-follow: periodic rescan for a newer session
+  let followTimer = null;
+  if (followMode) {
+    followTimer = setInterval(() => {
       try {
-        const newSession = parseSession(targetFile);
-        if (newSession.turns.length !== session.turns.length) {
-          session = newSession;
-          metrics = computeMetrics(session, rc);
-          renderDashboard(metrics, session, rc, profile);
-        }
+        const sessions = findSessions(projectFilter, profile);
+        if (sessions.length === 0) return;
+        const newest = sessions[0];
+        if (newest.path === currentFile) return;
+        // Only switch if current file has been idle for 30s+ AND newest is actually newer
+        const currentMtime = fs.statSync(currentFile).mtimeMs;
+        if (newest.mtime <= currentMtime) return;
+        if (Date.now() - lastLocalChange < 30_000) return;
+        // Switch
+        currentFile = newest.path;
+        lastLocalChange = Date.now();
+        attachWatcher();
+        session = parseSession(currentFile);
+        metrics = computeMetrics(session, rc);
+        showNotice(`→ switched to ${newest.project} · ${sessionShortId(currentFile)}`);
+        renderDashboard(metrics, session, rc, profile, hud);
       } catch { /* skip */ }
-    }, 2000);
+    }, 3000);
   }
 
   // Graceful exit
   process.on("SIGINT", () => {
+    if (followTimer) clearInterval(followTimer);
+    if (watcher) { try { watcher.close(); } catch {} }
+    if (pollTimer) clearInterval(pollTimer);
     process.stdout.write(`\n${DIM}Token meter stopped.${RESET}\n`);
     process.exit(0);
   });
+}
+
+// ── --sessions renderer ──────────────────────────────────────────────
+function renderActiveSessions(profile, rc) {
+  const sessions = findSessions(null, profile);
+  const now = Date.now();
+  const ACTIVE_WINDOW_MS = 10 * 60 * 1000;
+  const active = sessions.filter(s => now - s.mtime < ACTIVE_WINDOW_MS);
+
+  if (active.length === 0) {
+    console.log(`\n${DIM}No ${profile.name} sessions active in the last 10 minutes.${RESET}\n`);
+    return;
+  }
+
+  console.log(`\n${BOLD}Active ${profile.name} sessions${RESET} ${DIM}(mtime within 10 min)${RESET}\n`);
+  console.log(`  ${DIM}${"Age".padEnd(8)}${"Turns".padStart(6)}${"Cost".padStart(9)}  ${"×N".padEnd(5)} ${"Project".padEnd(30)} Session${RESET}`);
+  console.log(`  ${DIM}${"─".repeat(78)}${RESET}`);
+
+  for (const s of active) {
+    const parsed = parseSession(s.path);
+    const m = computeMetrics(parsed, rc);
+    if (!m) continue;
+    const age = fmtDuration(now - s.mtime) + " ago";
+    const mc = multColor(m.multiplier);
+    console.log(
+      `  ${DIM}${age.padEnd(8)}${RESET}` +
+      `${String(m.userTurnCount || m.turnCount).padStart(5)}  ` +
+      `${fmtCost(m.totalCost).padStart(9)}  ` +
+      `${mc}×${String(m.multiplier).padEnd(3)}${RESET} ` +
+      `${(parsed.project || "").slice(0, 30).padEnd(30)} ${DIM}${sessionShortId(s.path)}${RESET}`
+    );
+  }
+  console.log();
+  console.log(`  ${DIM}Pick one: npx agent-token-meter --session <id>${RESET}\n`);
+}
+
+// ── --session arg resolver ──────────────────────────────────────────
+function resolveSessionArg(arg, profile) {
+  // If it looks like a path and exists, use it directly
+  if (arg.includes("/") || arg.includes("\\") || arg.endsWith(".jsonl")) {
+    return path.resolve(arg);
+  }
+  // Otherwise treat as session id prefix, search in projects dir
+  const sessions = findSessions(null, profile);
+  const match = sessions.find(s => sessionShortId(s.path).startsWith(arg));
+  if (!match) {
+    console.error(`${RED}No session matching "${arg}" found.${RESET}`);
+    console.error(`${DIM}Run --sessions to list active sessions.${RESET}`);
+    process.exit(1);
+  }
+  return match.path;
 }
 
 main();

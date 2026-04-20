@@ -11,38 +11,30 @@ Agent Token Meter watches your coding agent's session and shows you the burn rat
 ![Agent Token Meter dashboard](https://raw.githubusercontent.com/albertdobmeyer/agent-token-meter/main/agent-token-meter-terminal-screenshot.png)
 
 ```
- Agent Token Meter v1.0.0  (Claude Code)
-────────────────────────────────────────────────────
-
- model      claude-opus-4-6
- session    12 user turns  (37 API calls)  1h 24m
-
- context    ██████░░░░░░░░░░░░░░░░░░░░░░░░ 18.2%
-            176.3k / 967.0k usable  (1.0M limit - 33.0k buffer)
-
- burn       +2.1k/call  accelerating
- compact    ~376 calls
-
- tokens     in: 3.8M   out: 42.1k
-            cache hit: 3.6M (96%)  write: 142.3k  uncached: 42
-            cache ROI: +$48.07 net savings (write: $5.50, saved: $53.57)
-
- cost       $7.83 total   ~$0.21/call   ~$5.58/hr
-            Sonnet 4.6: $1.57  Kimi K2.5: $0.49
-
-────────────────────────────────────────────────────
-
- workflow   BUILD  Productive zone. Context is earning its keep.
-
- overhead   159.5k of history  (baseline: 16.8k)
- ctx tax    $0.24/call for carrying conversation history
- /clear     saves $0.24/call  (~$4.72 over next 20 calls with handoff)
- projection ~$86.72 total by compaction (376 more calls)
-
-────────────────────────────────────────────────────
- last call  ctx: 176.3k  out: 1.2k  end_turn
-────────────────────────────────────────────────────
+ Agent Token Meter v1.1.0 · Claude Code · 32891718
+════════════════════════════════════════════════════════════
+ MULTIPLIER   ×7.6 ↑        $0.52 now   $0.04 fresh
+ BUILD — productive zone · context 22% · reset in ~442
+════════════════════════════════════════════════════════════
+ NOW
+ context      212.5k / 967.0k         22%
+ burn         +1706 tok/call ↑
+ last turn    212.5k in · 231 out · tool_use
+────────────────────────────────────────────────────────────
+ IF YOU CLEAR
+ per call     save $0.27
+ next 20      save ~$5.48
+ steps        write handoff → /clear → reload with plan
+────────────────────────────────────────────────────────────
+ SESSION
+ spend        $75.93 · 16 turns · 11h 55m · $6.36/hr
+ cache        97% hit · saved $350.12 · 27.7M in · 286.2k out
+ alt models   Sonnet 4.6 $15.19   Kimi K2.5 $5.35
+════════════════════════════════════════════════════════════
+ Watching · Ctrl+C to exit
 ```
+
+The headline is the **×N.N multiplier** — how much each call costs vs. a fresh-conversation call. ×1–×2 green, ×3 yellow, ×4+ red, ×5+ red background. The second line is a phase banner that fuses status (BUILD/HANDOFF/CLEAR), context fill, and reset ETA into one scannable sentence. When context exceeds the usable limit you see `⚠ HANDOFF AND CLEAR — context N% OVER · reset overdue Nm` instead.
 
 ## Supported agents
 
@@ -133,8 +125,17 @@ Use both together: the dashboard for your situational awareness, the hooks for t
 Run in a **split terminal pane** alongside your coding agent:
 
 ```bash
-# Auto-detect agent and watch the most recent session
+# Auto-detect agent and watch the most recent session (auto-follows as you switch terminals)
 npx agent-token-meter
+
+# List sessions active in the last 10 min
+npx agent-token-meter --sessions
+
+# Lock to a specific session by short id or path (disables auto-follow)
+npx agent-token-meter --session 32891718
+
+# Pin to the initial session without auto-follow
+npx agent-token-meter --no-follow
 
 # Specify agent explicitly
 npx agent-token-meter --agent claude-code
@@ -142,15 +143,18 @@ npx agent-token-meter --agent claude-code
 # List supported agents and detection status
 npx agent-token-meter --agents
 
-# List all sessions with cost summary
+# List all sessions ever (cost summary)
 npx agent-token-meter --all
 
 # Filter by project
 npx agent-token-meter --project augustus-trading
-
-# Watch a specific session file
-npx agent-token-meter ~/.claude/projects/my-project/SESSION_ID.jsonl
 ```
+
+### Multiple Claude Code terminals
+
+If you run more than one Claude Code instance at a time, the meter auto-follows the most recently active session by default. When you switch terminals and work there for 30 seconds or more, the meter switches with you and shows a one-line notice at the top. The header always shows the project and short session id of what's currently being watched — so you can tell at a glance whether the numbers belong to the conversation you're thinking about.
+
+Use `--sessions` to list active sessions, `--session <id>` to lock to one, or `--no-follow` to pin to the initial pick.
 
 ### Terminal setup
 
@@ -177,72 +181,61 @@ Most coding agents have some form of cost or context display, but none tell you 
 
 ## Reading the display
 
-### Context bar
+### ×N.N multiplier + phase banner (the headline)
 
 ```
- context    ██████████████████░░░░░░░░░░░░ 58.2%
-            563.2k / 967.0k usable  (1.0M limit - 33.0k buffer)
+ MULTIPLIER   ×7.6 ↑        $0.52 now   $0.04 fresh
+ BUILD — productive zone · context 22% · reset in ~442
 ```
 
-The usable space is the model's context limit minus the auto-compact buffer. When you hit ~95% of usable space, auto-compaction triggers.
+The headline answers the question "should I reset?" before anything else. The multiplier is `currentContext / baseline` — per-call cost ratio vs. a fresh conversation, displayed with one decimal of precision. The arrow tracks acceleration (`↑`/`=`/`↓`). `now` is the current per-call cost; `fresh` is what a fresh-conversation call would cost.
 
-### Burn rate + acceleration
+The phase banner compresses state + action into one sentence: phase name (EXPLORE / BUILD / HANDOFF / CLEAR), short rationale, context fill %, reset ETA. When context has already exceeded usable, the banner switches to `⚠ HANDOFF AND CLEAR — context N% OVER · reset overdue Nm`.
 
-```
- burn       +3.4k/call  accelerating
-```
+Color bands on the multiplier:
+- **×1–×2** green — fresh or productive, nothing to do
+- **×3** yellow — plan a handoff
+- **×4+** red — conversation history is taxing you heavily
+- **×5+** red background — stop and reset now
 
-- **Burn rate** — average context growth per API call over the last 10 calls (resets after compaction).
-- **Acceleration** — compares the rate from the last 5 calls vs. the previous 5. `accelerating` means you're reading larger files or getting longer responses. `decelerating` means the conversation is stabilizing. `steady` means consistent growth.
-
-### Compaction ETA
-
-```
- compact    ~142 calls
-```
-
-Estimated API calls until auto-compaction triggers, based on current burn rate. Color-coded:
-- Green (200+): no pressure
-- Yellow (50-200): getting there
-- Red (<50): consider resetting context
-- Inverted red (<10): reset now
-
-### Workflow advisor
+### NOW — what's the current state
 
 ```
- workflow   HANDOFF  Write a plan file soon: "save our plan to plan.md"
-
- overhead   283.1k of history  (baseline: 16.8k)
- ctx tax    $0.42/call for carrying conversation history
- /clear     saves $0.42/call  (~$8.41 over next 20 calls with handoff)
+ context      212.5k / 967.0k         22%
+ burn         +1706 tok/call ↑
+ last turn    212.5k in · 231 out · tool_use
 ```
 
-- **workflow** — current phase (EXPLORE > BUILD > HANDOFF > RESET) based on how much of your context is conversation overhead vs. the fixed baseline (system prompt + tools).
-- **overhead** — tokens of conversation history you're carrying.
-- **ctx tax** — the dollar cost per API call of that overhead, at cache-read rates.
-- **reset savings** — if you write a ~2k token handoff file and reset, this is how much you save per call and cumulatively over the next 20 calls.
-- **projection** — estimated total session cost by the time auto-compaction triggers.
+- **context** — current context size / usable limit (model limit minus the 33k auto-compact buffer) + fill %.
+- **burn** — average context growth per call over the last 10 calls. Arrow shows acceleration trend.
+- **last turn** — latest API call's context, output tokens, and stop reason. Useful for spotting which turns are driving burn.
 
-The optimal strategy: plan in one context, write a handoff, reset, then implement from the lean handoff.
-
-### Cost comparison
+### IF YOU CLEAR — the actionable projection
 
 ```
- cost       $7.83 total   ~$0.21/call   ~$5.58/hr
-            Sonnet 4.6: $1.57  Kimi K2.5: $0.49
+ per call     save $0.27
+ next 20      save ~$5.48
+ steps        write handoff → /clear → reload with plan
 ```
 
-Shows what the same workload would cost on alternative providers. Customize via config file.
+- **per call** — what you'd save on every subsequent call by writing a ~2k handoff file and resetting.
+- **next 20** — cumulative savings over the next 20 calls.
+- **steps** — the workflow: dump a plan file, reset context, reload in a fresh session.
 
-### Cache efficiency + ROI
+This section only appears when `/clear` would save more than ~$0.005/call — below that, it's silent to keep the dashboard quiet.
+
+### SESSION — the post-game breakdown
 
 ```
- tokens     in: 3.8M   out: 42.1k
-            cache hit: 3.6M (96%)  write: 142.3k  uncached: 42
-            cache ROI: +$48.07 net savings (write: $5.50, saved: $53.57)
+ spend        $75.93 · 16 turns · 11h 55m · $6.36/hr
+ cache        97% hit · saved $350.12 · 27.7M in · 286.2k out
+ alt models   Sonnet 4.6 $15.19   Kimi K2.5 $5.35
 ```
 
-The **cache ROI** line shows the net value of caching: how much the cache writes cost vs. how much you saved by reading from cache instead of paying full input price.
+- **spend** — total cost, user turn count, session duration, cost per hour.
+- **cache** — hit rate, cache ROI (net savings from caching), total billed input/output tokens.
+- **alt models** — what the same workload would have cost on other providers. Customize via config file.
+- **last** — most recent API call's context size, output tokens, stop reason. Useful for debugging unexpected burn.
 
 ## How it works
 
@@ -259,6 +252,8 @@ Coding agents write conversation logs as JSONL files. Each API response includes
 
 Agent Token Meter watches the active session file with `fs.watch` (falling back to polling), parses usage entries, and computes derived metrics: burn rate, acceleration, compaction prediction, and cost estimates.
 
+A background scan every 3 seconds tracks which session is most recently active. If a different session starts growing and the current one has been idle for 30 s or more, the meter switches to it — so it follows you when you jump between Claude Code terminals. For the hook, Claude Code passes the session id and transcript path on stdin, so threshold state is tracked per session and concurrent instances don't suppress each other's nudges.
+
 **It is strictly read-only.** It never modifies session files or interacts with any API.
 
 ## Pricing
@@ -267,11 +262,14 @@ Built-in rates (as of April 2026):
 
 | Model | Input | Output | Cache Write | Cache Read | Context |
 |---|---|---|---|---|---|
+| **Opus 4.7** | $15/M | $75/M | $18.75/M | $1.50/M | 1M |
 | **Opus 4.6** | $15/M | $75/M | $18.75/M | $1.50/M | 1M |
 | **Sonnet 4.6** | $3/M | $15/M | $3.75/M | $0.30/M | 1M |
 | **Haiku 4.5** | $0.80/M | $4/M | $1.00/M | $0.08/M | 200K |
 | **Kimi K2.5** | $0.60/M | $3.00/M | $0.60/M | $0.15/M | 262K |
 | **Kimi K2 Thinking** | $0.60/M | $2.50/M | $0.60/M | $0.15/M | 262K |
+
+> Opus 4.7 rates mirror Opus 4.6 as a conservative default — Anthropic has kept Opus family pricing consistent. Override via `~/.claude/token-meter.json` if that changes.
 
 ### Custom providers
 
