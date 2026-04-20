@@ -6,8 +6,8 @@
  * silent unless a context threshold (50%, 75%, 90%) is crossed.
  * Each threshold fires ONCE per session. Compaction re-arms them.
  *
- * Install:   npx claude-code-token-meter --install-hooks
- * Remove:    npx claude-code-token-meter --uninstall-hooks
+ * Install:   npx agent-token-meter --install-hooks
+ * Remove:    npx agent-token-meter --uninstall-hooks
  */
 import fs from "fs";
 import path from "path";
@@ -47,9 +47,26 @@ function saveState(s) {
   try { fs.writeFileSync(STATE, JSON.stringify(s)); } catch {}
 }
 
-// ── Session discovery ────────────────────────────────────────────────
+// ── Hook payload from stdin ──────────────────────────────────────────
+// Claude Code passes { session_id, transcript_path, cwd, tool_name, ... }
+// as JSON on stdin. Reading fd 0 synchronously works because the payload
+// is already buffered by the time the hook runs. Skip if stdin is a TTY
+// (manual testing) to avoid blocking.
 
-function findSession() {
+function readHookPayload() {
+  if (process.stdin.isTTY) return null;
+  try {
+    const raw = fs.readFileSync(0, "utf8");
+    if (!raw.trim()) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+// ── Session discovery fallback ───────────────────────────────────────
+
+function findSessionByMtime() {
   const dir = path.join(os.homedir(), ".claude", "projects");
   let best = null;
   try {
@@ -67,6 +84,11 @@ function findSession() {
     }
   } catch { /* no projects dir */ }
   return best?.path;
+}
+
+function sessionIdFromPath(filePath) {
+  const base = (filePath || "").split(/[\\/]/).pop() || "";
+  return base.replace(/\.jsonl$/, "");
 }
 
 // ── Quick JSONL parse (only extracts what we need) ───────────────────
@@ -116,17 +138,34 @@ function cacheRate(model) {
 
 // ── Main ─────────────────────────────────────────────────────────────
 
-const state = loadState();
-const session = findSession();
-if (!session) process.exit(0);
+const payload = readHookPayload();
+// Authoritative session from Claude Code's payload; fallback to mtime scan.
+const sessionPath = payload?.transcript_path || findSessionByMtime();
+if (!sessionPath) process.exit(0);
 
-// New session — reset state
-if (session !== state.session) {
-  Object.assign(state, { session, fired: [], compactions: 0 });
+const sessionId = payload?.session_id || sessionIdFromPath(sessionPath);
+
+// State is keyed by session_id so concurrent Claude Code instances don't
+// suppress each other's threshold firings.
+const allState = loadState();
+if (!allState.sessions) allState.sessions = {};
+// Migrate legacy state format (flat, single-session blob) on load.
+if (allState.session) {
+  const legacyId = sessionIdFromPath(allState.session);
+  if (legacyId && !allState.sessions[legacyId]) {
+    allState.sessions[legacyId] = {
+      fired: allState.fired || [], compactions: allState.compactions || 0,
+    };
+  }
+  delete allState.session;
+  delete allState.fired;
+  delete allState.compactions;
 }
+const state = allState.sessions[sessionId] || { fired: [], compactions: 0 };
+allState.sessions[sessionId] = state;
 
-const m = parseQuick(session);
-if (!m) { saveState(state); process.exit(0); }
+const m = parseQuick(sessionPath);
+if (!m) { saveState(allState); process.exit(0); }
 
 const limit = usableLimit(m.model);
 const pct = (m.ctx / limit) * 100;
@@ -135,7 +174,7 @@ const pct = (m.ctx / limit) * 100;
 if (m.compactions > (state.compactions || 0)) {
   state.compactions = m.compactions;
   state.fired = (state.fired || []).filter(t => t <= pct);
-  saveState(state);
+  saveState(allState);
   emit(`Compaction detected (${m.compactions}x). Context reset to ${pct.toFixed(0)}%. Thresholds re-armed.`);
   process.exit(0);
 }
@@ -146,11 +185,11 @@ for (const t of THRESHOLDS) {
     state.fired = [...(state.fired || []), t.pct];
     const tax = (m.ctx / 1e6 * cacheRate(m.model)).toFixed(2);
     const msg = t.fn ? t.fn(tax) : t.msg;
-    saveState(state);
+    saveState(allState);
     emit(msg);
     process.exit(0);
   }
 }
 
 // No threshold crossed — silent
-saveState(state);
+saveState(allState);
