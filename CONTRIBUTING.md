@@ -69,11 +69,12 @@ Releases publish via GitHub Actions on a `v*` tag push. No npm tokens ever touch
 
 **One-time setup** (per repo, ~2 minutes):
 
-1. On npmjs.com, generate a **Granular Access Token** scoped to the `agent-token-meter` package with:
+1. On npmjs.com, generate a **Granular Access Token** (name: `agent-token-meter-ci`) with:
    - Permissions: **Read and write**
    - Packages: `agent-token-meter`
+   - Allow 2FA bypass for publishes: **enabled** (CI can't do interactive 2FA)
    - Expiration: 90 days (shorter is better; rotate on expiry)
-2. Add it to the repo: GitHub → Settings → Secrets and variables → Actions → **New repository secret** → name `NPM_TOKEN`, value the token. The secret is never exposed in workflow logs.
+2. Add it to the repo: GitHub → Settings → Secrets and variables → Actions → **New repository secret** → name `NPM_AGENT_TOKEN_METER_CI`, value the token. The secret is never exposed in workflow logs.
 
 **Per-release workflow:**
 
