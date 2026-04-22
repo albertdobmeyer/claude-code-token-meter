@@ -4,6 +4,11 @@ All notable changes to **agent-token-meter** are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] — 2026-04-22
+
+### Added
+- Session-rollover hint. When Claude Code opens a fresh `.jsonl` on `/resume` or a new `claude` invocation in the same cwd, the meter now surfaces a startup slide like `new session segment · prior fa7a76de (2.8MB, 26m ago) · metrics cover this segment only` whenever the current file has ≤5 user turns and a substantial prior `.jsonl` exists in the same project dir. Prevents a long, rolled-over conversation from reading as a short one.
+
 ## [1.2.1] — 2026-04-20
 
 ### Fixed
@@ -50,6 +55,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Support for Claude Code via `~/.claude/projects/` JSONL logs.
 - `--install-hooks` / `--uninstall-hooks` for in-context threshold nudges at 50/75/90%.
 
+[1.2.2]: https://github.com/albertdobmeyer/agent-token-meter/releases/tag/v1.2.2
 [1.2.1]: https://github.com/albertdobmeyer/agent-token-meter/releases/tag/v1.2.1
 [1.2.0]: https://github.com/albertdobmeyer/agent-token-meter/releases/tag/v1.2.0
 [1.1.0]: https://github.com/albertdobmeyer/agent-token-meter/releases/tag/v1.1.0

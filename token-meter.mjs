@@ -18,7 +18,7 @@ import path from "path";
 import os from "os";
 import { fileURLToPath } from "url";
 
-const VERSION = "1.2.1";
+const VERSION = "1.2.2";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ── Agent Profiles ───────────────────────────────────────────────────
@@ -1063,6 +1063,32 @@ function main() {
   } else {
     startupSlides.push({ text: `pinned to ${startupShortId} · auto-follow off`, ms: 4000 });
   }
+
+  // Session-rollover hint — Claude Code opens a new .jsonl on /resume
+  // or a fresh `claude` in the same cwd, so a long conversation can
+  // read as a short one. When the current file has just a handful of
+  // user turns and a substantial prior .jsonl exists in the same
+  // project dir, flag it so the numbers aren't mistaken for the whole
+  // conversation. We don't aggregate — just make the scope explicit.
+  if (scopeActive) {
+    const ROLLOVER_TURN_CAP = 5;
+    const PRIOR_MIN_BYTES = 100 * 1024;
+    if ((session.userTurns || 0) <= ROLLOVER_TURN_CAP) {
+      const siblings = findSessions(effectiveFilter, profile, { exact: effectiveExact })
+        .filter(s => s.path !== currentFile && s.size >= PRIOR_MIN_BYTES)
+        .sort((a, b) => b.mtime - a.mtime);
+      const prior = siblings[0];
+      if (prior) {
+        const priorMB = (prior.size / 1e6).toFixed(1);
+        const priorAge = fmtDuration(Date.now() - prior.mtime);
+        startupSlides.push({
+          text: `new session segment · prior ${sessionShortId(prior.path)} (${priorMB}MB, ${priorAge} ago) · metrics cover this segment only`,
+          ms: 6000,
+        });
+      }
+    }
+  }
+
   queueNotices(startupSlides);
 
   // Watch current file
