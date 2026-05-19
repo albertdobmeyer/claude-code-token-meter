@@ -4,7 +4,7 @@
 
 **A speedometer for your context window.** Zero dependencies. Single file. Answers one question: *should I reset my context right now?*
 
-AI coding agents bill linearly per token — but session cost grows **quadratically, not just linearly**, because every turn resends the entire history. A 100-turn conversation doesn't cost 10× a 10-turn one. It costs roughly **50×**. And reasoning quality degrades well before the context window actually fills — the model attends more weakly to the middle of a long conversation than to its start and recent tail, so drift sets in long before you hit any limit. Most developers have no real-time visibility into either.
+AI coding agents bill linearly per token — but session cost grows **quadratically, not just linearly**, because every turn resends the entire history. A 100-turn conversation doesn't cost 10× a 10-turn one. It costs roughly **90×** (worked example in "Why short sessions win" below). And reasoning quality degrades well before the context window actually fills — the model attends more weakly to the middle of a long conversation than to its start and recent tail, so drift sets in long before you hit any limit. Most developers have no real-time visibility into either.
 
 Agent Token Meter watches your coding agent's session and shows you the burn rate, acceleration, and estimated calls until auto-compaction — so you know *when* to curate a handoff and reset, not just how much you've spent after the fact.
 
@@ -107,7 +107,7 @@ Each threshold fires **once per session**. When auto-compaction happens, thresho
 
 ### How it works
 
-The hook script (`~/.claude/hooks/token-meter-hook.mjs`) runs in ~20ms:
+The hook script (`~/.claude/hooks/token-meter-hook.mjs`) typically runs in under 50ms:
 
 1. Finds the active session JSONL file
 2. Parses it for current context size and model
@@ -244,12 +244,12 @@ npx agent-token-meter --agents
 npx agent-token-meter --all
 
 # Filter by project name substring
-npx agent-token-meter --project augustus-trading
+npx agent-token-meter --project my-app
 ```
 
 ### Which session is being watched?
 
-The meter watches **one session at a time, scoped to your current working directory by default.** Launch it from `B:\A5DS-HQ\agent-token-meter` and it only considers sessions in that project — never a newer one from an unrelated repo. It derives the project directory from `cwd` using Claude Code's own naming scheme (replace `/`, `\`, `:` each with `-`: `B:\A5DS-HQ\agent-token-meter` → `B--A5DS-HQ-agent-token-meter`).
+The meter watches **one session at a time, scoped to your current working directory by default.** Launch it from `~/code/my-project` and it only considers sessions in that project — never a newer one from an unrelated repo. It derives the project directory from `cwd` using Claude Code's own naming scheme (replace `/`, `\`, `:` each with `-`: `~/code/my-project` → `-Users-you-code-my-project`).
 
 The dashboard header shows both the project directory name and the short session id:
 
@@ -421,11 +421,11 @@ Agent Token Meter watches the active session file with `fs.watch` (falling back 
 
 A background scan every 3 seconds tracks which session is most recently active. If a different session starts growing and the current one has been idle for 30 s or more, the meter switches to it — so it follows you when you jump between Claude Code terminals. For the hook, Claude Code passes the session id and transcript path on stdin, so threshold state is tracked per session and concurrent instances don't suppress each other's nudges.
 
-**It is strictly read-only.** It never modifies session files or interacts with any API.
+**The session-file watcher is strictly read-only.** It never modifies your session logs and makes no network calls. All filesystem writes (hook install, agent protocol install, hook state file) live behind explicit opt-in flags and are enumerated in [SECURITY.md](SECURITY.md).
 
 ## Pricing
 
-Built-in rates (as of April 2026):
+Built-in rates (as of v1.4):
 
 | Model | Input | Output | Cache Write | Cache Read | Context |
 |---|---|---|---|---|---|
@@ -474,7 +474,7 @@ If each turn adds ~2k tokens of context:
 | 50 | 100k | 2.55M |
 | 100 | 200k | 10.1M |
 
-A 100-turn session bills ~50× a 10-turn one, not 10×. **Short sessions win even when nothing about the pricing tier changes.**
+A 100-turn session bills ~90× a 10-turn one, not 10×. **Short sessions win even when nothing about the pricing tier changes.**
 
 Prompt caching is a partial mitigant, not a refutation. Cached reads cost ~10% of fresh input ($1.50/M vs $15/M on Opus), so a session with a 97% cache hit rate runs at roughly a 10× discount on the input bill. But the *shape* doesn't change: per-call cost still grows linearly with `n` (you read the whole history every turn, even if cheaply), so cumulative spend stays O(n²) — just with a smaller coefficient. And the cache TTL is ~5 minutes; idle past that and you're paying full price on the next call.
 

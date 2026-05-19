@@ -4,6 +4,24 @@ All notable changes to **agent-token-meter** are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.2] — 2026-05-19
+
+### Fixed
+- **README + AGENT-PROTOCOL.md `~50×` claim corrected to `~90×`.** A 100-turn vs 10-turn comparison at 2k tokens/turn yields a 91.8× billed-input ratio, not 50× — the table in the README already showed the correct math (`110k` → `10.1M`), but the prose summary used a conservative number that didn't reconcile. Now the headline and the worked example match.
+- **`SECURITY.md` "four known paths" corrected to enumerate all six.** v1.4 added `./AGENT-PROTOCOL.md` and `./CLAUDE.md` writes via `--install-protocol`, but the Scope section still said "four." Now references the **Files this tool writes to** enumeration as the canonical list.
+- **`SECURITY.md` overclaim on `npm audit signatures` scoped down.** The previous wording — "tampering at any step breaks `npm audit signatures`" — was wrong; that command checks the published tarball and provenance but not the source git tag signature. Now the two checks (`npm audit signatures` + `git tag --verify`) are documented as independent and complementary.
+- **README "strictly read-only" claim scoped to the watcher process.** Previous wording could be read as the whole tool being read-only; the dashboard and watcher are read-only, but the installer flags write files (and that's enumerated in SECURITY.md). Clarified.
+- **`~20ms` hook runtime claim softened to "typically under 50ms".** The 20ms number was plausible but not benchmarked; the softer claim is defensible across machine speeds and session sizes.
+- **Stale path examples replaced with generic placeholders.** `B:\A5DS-HQ\agent-token-meter` (old maintainer workspace) and `--project augustus-trading` (specific personal project) replaced with `~/code/my-project` and `--project my-app`.
+- **AGENT-PROTOCOL.md "Following this protocol means:" softened to "Following this protocol helps".** The previous phrasing implied a guarantee; the protocol helps but doesn't guarantee outcomes across all models, sessions, and tasks.
+- **Pricing table dated "as of April 2026" updated to "as of v1.4".** Version-tagged is more durable than calendar-tagged and avoids the staleness drift the README hit between 1.4.0 and 1.4.1.
+
+### Added
+- **`SECURITY.md` "Privacy posture" section.** Explicit, prominent disclosure that the tool makes no network calls, generates no user identifier, stores all state locally, and only extracts structural metadata (token counts, model IDs, turn timestamps) from session JSONL files — never copying or transmitting conversation content. Addresses a reasonable concern users may have about a tool that monitors AI-coding sessions.
+
+### Why
+Pre-ship documentation audit of every user-facing claim ahead of the npm landing-page promo push. Findings: nothing was a behavior bug, but several prose claims didn't reconcile with the code or with each other. v1.4.2 brings every claim into alignment with the implementation. No behavior change — same dashboard, same hooks, same wire format. Just claims that hold up under scrutiny.
+
 ## [1.4.1] — 2026-05-18
 
 ### Fixed
@@ -132,6 +150,7 @@ No behavior change to read-only telemetry, session-file watching, or the cost-mu
 - Support for Claude Code via `~/.claude/projects/` JSONL logs.
 - `--install-hooks` / `--uninstall-hooks` for in-context threshold nudges at 50/75/90%.
 
+[1.4.2]: https://github.com/albertdobmeyer/agent-token-meter/releases/tag/v1.4.2
 [1.4.1]: https://github.com/albertdobmeyer/agent-token-meter/releases/tag/v1.4.1
 [1.4.0]: https://github.com/albertdobmeyer/agent-token-meter/releases/tag/v1.4.0
 [1.2.5]: https://github.com/albertdobmeyer/agent-token-meter/releases/tag/v1.2.5

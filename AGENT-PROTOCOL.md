@@ -172,7 +172,7 @@ disposable, single-continuation.
 
 1. Per-turn pricing is linear, but each turn re-sends the entire conversation
    history. Cumulative session cost is therefore **quadratic** with session
-   length, not linear. A 100-turn session bills ~50× a 10-turn session.
+   length, not linear. A 100-turn session bills ~90× a 10-turn session.
 
 2. The active reasoning workspace of a long-context model is far smaller than
    its advertised context window. Modern models can *retrieve* from a 1M-token
@@ -193,8 +193,10 @@ The auto-`/compact` alternative is a model summarizing itself when its
 attention is most degraded — exactly when you should least trust its
 judgment about what matters.
 
-Following this protocol means: the user's session cost stays bounded, and
-your reasoning quality stays sharp.
+Following this protocol helps keep the user's session cost bounded and your
+reasoning quality sharp. It does not guarantee perfect continuity across the
+clear — but it makes the next session a clean, position-bias-friendly start
+instead of a noisy, attention-degraded continuation.
 
 ## When you have no handoff file and no nudge fires
 

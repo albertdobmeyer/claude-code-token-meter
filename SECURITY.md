@@ -21,7 +21,7 @@ You'll get an acknowledgment within 72 hours. For high-severity issues, expect a
 **In scope:**
 
 - Code execution or privilege escalation triggered by running `agent-token-meter` or its hook
-- File-system writes outside the four known paths: `~/.claude/settings.json`, `~/.claude/hooks/token-meter-hook.mjs`, `~/.claude/token-meter-hook-state.json`, and `~/.claude/token-meter.json`
+- File-system writes outside the paths enumerated in **Files this tool writes to** below — currently six: `~/.claude/settings.json`, `~/.claude/hooks/token-meter-hook.mjs`, `~/.claude/token-meter-hook-state.json`, `~/.claude/token-meter.json`, `./AGENT-PROTOCOL.md`, and `./CLAUDE.md` (the last two only on `--install-protocol`)
 - Silent modification or deletion of unrelated hook entries during `--install-hooks` / `--uninstall-hooks`
 - Supply-chain integrity issues: tampering with published tarballs, forged or missing provenance attestations, compromised CI workflow
 - Prompt-injection vectors in the threshold hook — e.g., if attacker-controlled text in a session log could be reflected into the `additionalContext` field sent back to the agent
@@ -59,7 +59,16 @@ The attestation cryptographically ties the tarball to a specific commit in this 
 - **Exact-path hook matching.** Install/uninstall identifies our hook entries by the exact installed filename, never a substring match — so an unrelated user hook with "token-meter" in its name can't be silently removed.
 - **Published from signed CI.** No maintainer laptop holds publish credentials. The npm access token lives only as an encrypted GitHub repository secret (`NPM_AGENT_TOKEN_METER_CI`).
 - **GitHub Actions pinned to commit SHAs.** Every external Action used in `ci.yml` and `publish.yml` is pinned to a specific commit hash (with a comment indicating the matching version tag). A compromise of an upstream Action's tag cannot affect us until we explicitly review and update the pinned SHA. Updates ride through Dependabot or a deliberate maintainer change.
-- **Signed git tags for releases.** Release tags (`v*`) are GPG- or SSH-signed by the maintainer. Combined with SLSA provenance and the tag-version-matches-package.json check in the publish workflow, this creates a three-step chain: signed tag → CI verifies tag = package.json version → npm `--provenance` attestation links the published tarball to the commit. Tampering at any step breaks `npm audit signatures`.
+- **Signed git tags for releases.** Release tags (`v*`) are GPG- or SSH-signed by the maintainer. Combined with SLSA provenance and the tag-version-matches-package.json check in the publish workflow, this creates a three-step chain: signed tag → CI verifies tag = package.json version → npm `--provenance` attestation links the published tarball to the commit. Tampering with the published tarball or its provenance is caught by `npm audit signatures`; tampering with the source tag itself is caught by `git tag --verify`. The two checks are independent — together they cover the full chain.
+
+## Privacy posture
+
+Because the meter watches an AI-coding session, users have reasonably asked what the tool itself learns about them. The short answer: nothing leaves your machine.
+
+- **No telemetry.** The tool makes no network calls — ever. There is no analytics, no phone-home, no error reporting, no version-check ping. The only network activity related to this package is `npm audit signatures`, which you run yourself.
+- **No user identification.** We do not generate, store, or transmit any identifier for you. The hook state file (`~/.claude/token-meter-hook-state.json`) is keyed only by Claude Code's local session UUIDs.
+- **All state is local.** Every file the tool creates lives on your filesystem, enumerated below, removable via `--uninstall-hooks` / `--uninstall-protocol`.
+- **What the tool reads from your session.** The dashboard and hook parse your session JSONL files (`~/.claude/projects/*/*.jsonl`) to extract token counts, model identifiers, and turn timestamps. Your conversation *content* is in those files but the tool extracts only the structural metadata — and nothing is copied, transmitted, or logged elsewhere.
 
 ## Files this tool writes to
 
