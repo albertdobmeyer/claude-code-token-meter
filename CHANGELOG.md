@@ -4,6 +4,17 @@ All notable changes to **agent-token-meter** are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] — 2026-05-18
+
+### Fixed
+- **README dashboard examples updated to match the polished v1.4 output.** The PNG screenshot was refreshed in 1.4.0 but several text code-fences in the README still showed the pre-polish layout (multi-line `WHAT TO HANDOFF` widget, duplicated `[DRIFT]` zone tag on the multiplier line, `12 pages` overlay on the context line, `write handoff → /clear → reload with plan` step phrasing). Every example fence and explanatory paragraph now matches the actual dashboard output, including the new dual-signal phase banner (`fill N% (overhead M%)`), the single-canonical zone tag location, and the new `HANDOFF SECTIONS` section header.
+- **"Which session is being watched?" example header** updated to show the new two-line clean form (`agent-token-meter · 6cfb4866` instead of the truncated encoded path).
+- **Startup-slide table** updated — the `watching: <project> · <id>` row was removed in 1.4.0 (header line 2 now carries that signal) but the docs table still listed it.
+- **`SESSION` explanation** now documents the `output` ratio line (added in 1.4.0) and removes the reference to a `last` field that was never in that section.
+
+### Security
+- **`.github/dependabot.yml` added.** Weekly schedule on `github-actions` ecosystem — opens a PR whenever a pinned-by-SHA Action has a newer release. Keeps the supply-chain hardening fresh without manual maintenance burden. The PR updates both the SHA and the inline version comment in a single diff, so reviewers see exactly what changed.
+
 ## [1.4.0] — 2026-05-18
 
 ### Added
@@ -121,6 +132,7 @@ No behavior change to read-only telemetry, session-file watching, or the cost-mu
 - Support for Claude Code via `~/.claude/projects/` JSONL logs.
 - `--install-hooks` / `--uninstall-hooks` for in-context threshold nudges at 50/75/90%.
 
+[1.4.1]: https://github.com/albertdobmeyer/agent-token-meter/releases/tag/v1.4.1
 [1.4.0]: https://github.com/albertdobmeyer/agent-token-meter/releases/tag/v1.4.0
 [1.2.5]: https://github.com/albertdobmeyer/agent-token-meter/releases/tag/v1.2.5
 [1.2.4]: https://github.com/albertdobmeyer/agent-token-meter/releases/tag/v1.2.4

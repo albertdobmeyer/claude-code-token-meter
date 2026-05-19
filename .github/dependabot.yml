@@ -1,0 +1,26 @@
+# Dependabot configuration for agent-token-meter.
+#
+# The package itself has zero runtime dependencies, so there's nothing to scan
+# under "npm". But we do pin GitHub Actions by commit SHA (see
+# .github/workflows/*.yml), and those need a human-reviewed bump path so
+# pinning doesn't rot. Dependabot opens a PR whenever a pinned Action has a
+# newer published version — the PR updates both the SHA and the inline
+# version comment, so the audit trail stays accurate.
+#
+# Weekly cadence keeps PRs manageable. Reviewer/assignee is the CODEOWNERS
+# default. PRs that touch publish.yml warrant extra scrutiny — they affect
+# the supply chain directly.
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    labels:
+      - "ci"
+      - "dependencies"

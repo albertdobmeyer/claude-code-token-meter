@@ -12,34 +12,29 @@ Agent Token Meter watches your coding agent's session and shows you the burn rat
 
 ```
  Agent Token Meter v1.4.0 · Claude Code
- B--A5DS-HQ-agent-token-meter · 32891718
+ agent-token-meter · 80ff748f
 ════════════════════════════════════════════════════════════
- MULTIPLIER   ×7.6 ↑ [DRIFT]   $0.52 now   $0.04 fresh
- BUILD — productive zone, reasoning sharp · fill 78% (overhead 22%) · reset in ~442
+ MULTIPLIER   ×15.7 ↑   $0.88 now   $0.05 fresh
+ ⚠ CLEAR — fill 51% (overhead 48%) · reset in ~642 turns
 ════════════════════════════════════════════════════════════
- NOW (post-compaction × 1)
- context  ███████████████████████░░░░░░░  78% · 12 pages [DRIFT]
- burn         +1706 tok/call ↑
- last turn    212.5k in · 231 out · tool_use
+ NOW
+ context  ███████████████░░░░░░░░░░░░░░░  51% [SOFTENING]
+ burn         +738 tok/call ↑
+ last turn    492.9k in · 1.5k out · end_turn
 ────────────────────────────────────────────────────────────
  IF YOU CLEAR
- per call     save $0.27
- reasoning    DRIFT → SHARP
- next 20      save ~$5.48
+ per call     save $0.69
+ next 20      save ~$13.79
  steps        curate handoff → /clear → reload (lands at position 0)
 ────────────────────────────────────────────────────────────
- WHAT TO HANDOFF
- mission      one sentence — session goal
- decisions    what should NOT be re-litigated
- open         in-flight work with file:line refs
- next         the literal next concrete step
- avoid        things tried that didn't work
+ HANDOFF SECTIONS
+ mission · constraints · decisions · open · next · files · avoid
 ────────────────────────────────────────────────────────────
  SESSION
- spend        $75.93 · 16 turns · 11h 55m · $6.36/hr
- cache        97% hit · saved $350.12 · 27.7M in · 286.2k out
- output       286.2k total · 1.0% of inputs
- alt models   Sonnet 4.6 $15.19   Kimi K2.5 $5.35
+ spend        $304.04 · 27 turns · 7h 47m · $39.06/hr
+ cache        98% hit · saved $1557.60 · 121.9M in · 991.9k out
+ output       991.9k total · 0.8% of inputs
+ alt models   Sonnet 4.6 $60.81   Kimi K2.5 $22.48
 ════════════════════════════════════════════════════════════
  Watching · Ctrl+C to exit
 ```
@@ -259,17 +254,17 @@ The meter watches **one session at a time, scoped to your current working direct
 The dashboard header shows both the project directory name and the short session id:
 
 ```
-Agent Token Meter v1.4.0 · Claude Code · B--A5DS-HQ-agent-token-meter · 6cfb4866
+Agent Token Meter v1.4.0 · Claude Code
+agent-token-meter · 6cfb4866
 ```
 
-This is the primary disambiguation signal — you match the project string (with the drive letter and path segments) against your terminal's `cwd` to confirm the numbers belong to the conversation you're thinking about. The short session id is the tiebreaker if multiple terminals are open in the same project; Claude Code's `/status` command shows the same id.
+The line-2 project name is the basename of your current working directory (e.g. `agent-token-meter`) when the watched session is in cwd. In `--all-projects` mode, or when watching a session outside cwd via `--session`, it falls back to Claude Code's encoded form (e.g. `B--AKD-DEV-WORK-portfolio-productivity-agent-token-meter`) as the unambiguous identifier. The short session id is always present as the secondary signal — it matches what `/status` shows in Claude Code.
 
-A transient cyan line at the **bottom** of the dashboard cycles through 2–4 startup slides (each ~4–5s, then the line goes quiet) so the numbers above never shift:
+A transient cyan line at the **bottom** of the dashboard cycles through 2–3 startup slides (each ~4–5s, then the line goes quiet) so the numbers above never shift:
 
 | Slide | When it shows |
 |---|---|
 | `no sessions in cwd (<project>) · watching newest globally · --all-projects to keep this mode` | You launched from a directory with no Claude Code sessions — fell back to global scan |
-| `watching: <cwd or project> · <short id>` | Always |
 | `follow mode on · switches to newest in this project after 30s idle` | Default mode |
 | `+N other active in this project · --sessions to list · --session <id> to pin` | Multiple sessions open in the same project |
 | `new session segment · prior <id> (2.8MB, 26m ago) · metrics cover this segment only` | Claude Code just rolled over to a fresh `.jsonl` — a long conversation now lives across two files |
@@ -341,14 +336,14 @@ Most coding agents have some form of cost or context display, but none tell you 
 
 ```
  MULTIPLIER   ×7.6 ↑        $0.52 now   $0.04 fresh
- BUILD — productive zone · context 22% · reset in ~442
+ BUILD — productive zone, reasoning sharp · fill 22% (overhead 18%) · reset in ~442 turns
 ```
 
 The headline answers the question "should I reset?" before anything else. The multiplier is `currentContext / baseline` — per-call cost ratio vs. a fresh conversation, displayed with one decimal of precision. The arrow tracks acceleration (`↑`/`=`/`↓`). `now` is the current per-call cost; `fresh` is what a fresh-conversation call would cost.
 
-The phase banner compresses state + action into one sentence: phase name (EXPLORE / BUILD / HANDOFF / CLEAR), short rationale, context fill %, reset ETA. When context has already exceeded usable, the banner switches to `⚠ HANDOFF AND CLEAR — context N% OVER · reset overdue Nm`.
+The phase banner compresses state + action into one sentence: phase name (EXPLORE / BUILD / HANDOFF / CLEAR), short rationale, **both** context signals — `fill N%` (raw window consumption) and `(overhead M%)` (history accumulated since baseline) — and the reset ETA in turns. When context has already exceeded usable, the banner switches to `⚠ HANDOFF AND CLEAR — context N% OVER · reset overdue Nm`.
 
-Color bands on the multiplier:
+Color bands on the multiplier (cost axis only — reasoning-quality is reported separately on the context-bar line):
 - **×1–×2** green — fresh or productive, nothing to do
 - **×3** yellow — plan a handoff
 - **×4+** red — conversation history is taxing you heavily
@@ -357,41 +352,57 @@ Color bands on the multiplier:
 ### NOW — what's the current state
 
 ```
- context      212.5k / 967.0k         22%
+ NOW
+ context  ██████░░░░░░░░░░░░░░░░░░░░░░░░  22% [SHARP]
  burn         +1706 tok/call ↑
  last turn    212.5k in · 231 out · tool_use
 ```
 
-- **context** — current context size / usable limit (model limit minus the 33k auto-compact buffer) + fill %.
+- **context** — a 30-cell visual bar tinted by reasoning zone, plus fill % and the zone tag itself (`[SHARP]` / `[SOFTENING]` / `[DRIFT]` / `[TOLERANCE]` / `[OVER]`). The zone signal lives only here — it doesn't duplicate on the multiplier line above.
 - **burn** — average context growth per call over the last 10 calls. Arrow shows acceleration trend.
 - **last turn** — latest API call's context, output tokens, and stop reason. Useful for spotting which turns are driving burn.
+- *(if a compaction has occurred this session)* the section header reads `NOW (post-compaction × 1)` — a persistent reminder that this session's reasoning workspace was reset at least once by `/compact`.
 
 ### IF YOU CLEAR — the actionable projection
 
 ```
+ IF YOU CLEAR
  per call     save $0.27
+ reasoning    DRIFT → SHARP
  next 20      save ~$5.48
- steps        write handoff → /clear → reload with plan
+ steps        curate handoff → /clear → reload (lands at position 0)
 ```
 
-- **per call** — what you'd save on every subsequent call by writing a ~2k handoff file and resetting.
+- **per call** — what you'd save on every subsequent call by writing a ~2k handoff file and resetting. (Shown only when the cost-savings trigger fires.)
+- **reasoning** — current reasoning zone → what `/clear` would reset you to. (Shown only when the attention-degradation trigger fires — i.e. zone is `DRIFT`, `TOLERANCE`, or `OVER`.)
 - **next 20** — cumulative savings over the next 20 calls.
-- **steps** — the workflow: dump a plan file, reset context, reload in a fresh session.
+- **steps** — the literal workflow: curate the handoff file, run `/clear`, reload — your handoff lands at position 0 of the fresh session, in the model's high-attention zone.
 
-This section only appears when `/clear` would save more than ~$0.005/call — below that, it's silent to keep the dashboard quiet.
+This section appears when **either** trigger fires — meaningful cost savings *or* a degraded reasoning zone. Below both, it stays silent to keep the dashboard quiet.
+
+### HANDOFF SECTIONS — schema reminder
+
+```
+ HANDOFF SECTIONS
+ mission · constraints · decisions · open · next · files · avoid
+```
+
+A one-line reminder of the 7-section schema your handoff file should contain. The widget appears only during HANDOFF and RESET phases, when you're actually about to write the file. The full schema with examples lives in the bundled `AGENT-PROTOCOL.md` — installed via `npx agent-token-meter --install-protocol`.
 
 ### SESSION — the post-game breakdown
 
 ```
+ SESSION
  spend        $75.93 · 16 turns · 11h 55m · $6.36/hr
  cache        97% hit · saved $350.12 · 27.7M in · 286.2k out
+ output       286.2k total · 1.0% of inputs
  alt models   Sonnet 4.6 $15.19   Kimi K2.5 $5.35
 ```
 
 - **spend** — total cost, user turn count, session duration, cost per hour.
 - **cache** — hit rate, cache ROI (net savings from caching), total billed input/output tokens.
+- **output** — cumulative generated output tokens and the output-vs-input ratio. The model's generated output competes for the same active reasoning workspace as the input — a high ratio (>3%) means the agent is producing a lot relative to what it's reading, and that consumes attention budget too. Surfaces a yellow `⚠ verbose` flag past 3%.
 - **alt models** — what the same workload would have cost on other providers. Customize via config file.
-- **last** — most recent API call's context size, output tokens, stop reason. Useful for debugging unexpected burn.
 
 ## How it works
 
