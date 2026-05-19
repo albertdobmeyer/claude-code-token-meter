@@ -53,30 +53,56 @@ Adding a new agent requires only a profile object and a parser function. See the
 
 ## Install
 
-The fastest path (no install at all — recommended):
+### Quick start
+
+In a separate terminal pane, alongside Claude Code:
 
 ```bash
 npx agent-token-meter
 ```
 
-`npx` downloads and runs the latest version on demand. Re-runs use a local cache. Nothing pollutes your global packages.
+Nothing to install. `npx` downloads the latest version on demand, runs it against your active Claude Code session, and shows the dashboard. Close with Ctrl+C.
 
-If you'd rather have the command available system-wide:
+**Prerequisite:** Claude Code is running (or has run in this project before) — the meter reads its session logs from `~/.claude/projects/`. If you've never used Claude Code in this directory, start a session there first, then launch the meter.
+
+### Full agentic setup (one-time per project)
+
+To let the agent itself respond to the meter's threshold nudges and follow the bundled handoff protocol:
 
 ```bash
-npm i -g agent-token-meter
-agent-token-meter            # now runs from anywhere
+npx agent-token-meter --install-hooks --install-protocol
 ```
 
-> **Note:** the npm landing page suggests `npm i agent-token-meter` (without `-g`). That command works, but because this is a CLI-only package it just drops the binary into `./node_modules/.bin/` of whatever directory you're in — your shell won't find it on PATH. Use `npx` or the global install above instead.
+This wires two things at once:
 
-To clone and run directly from source:
+1. **Threshold hooks** → `~/.claude/hooks/token-meter-hook.mjs` plus three event registrations in `~/.claude/settings.json` (`PostToolUse`, `SessionStart`, `PostCompact`)
+2. **Agent protocol** → `./AGENT-PROTOCOL.md` in this project, plus a single `@import` line in `./CLAUDE.md`
+
+Both are atomic, idempotent, and reversible:
 
 ```bash
+npx agent-token-meter --uninstall-hooks       # remove hooks only
+npx agent-token-meter --uninstall-protocol    # remove protocol only
+```
+
+See **Threshold hooks** and **Agent Protocol** sections below for what each piece does. Complete file-write scope is enumerated in [SECURITY.md](SECURITY.md).
+
+### Alternate install methods
+
+```bash
+# System-wide install — adds `agent-token-meter` to your PATH
+npm i -g agent-token-meter
+agent-token-meter
+
+# From source — clone and run directly
 git clone https://github.com/albertdobmeyer/agent-token-meter
 cd agent-token-meter
 node token-meter.mjs
 ```
+
+### Heads-up about the npm-page install snippet
+
+npm's landing page displays `npm i agent-token-meter` as the default install command for every package. For our CLI-only package, that command works but only drops the binary into `./node_modules/.bin/` of whatever directory you're in — your shell **won't find it on PATH**. If you copied that snippet from the npm page and the `agent-token-meter` command isn't recognized, use `npx agent-token-meter` (Quick start above) or `npm i -g agent-token-meter` instead.
 
 **Requirements:** Node.js 18+ (zero dependencies).
 

@@ -4,6 +4,19 @@ All notable changes to **agent-token-meter** are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.3] — 2026-05-19
+
+### Changed
+- **README Install section restructured for clarity.** A pre-ship audit found the install information had three issues: (1) the word "install" was overloaded across three different concepts (package install, hook install, protocol install) without an obvious hierarchy, (2) the combined full-setup command was buried in the Agent Protocol section several screen-heights below, (3) no prerequisite about Claude Code being installed/running. The section now uses a flatter four-subsection structure:
+  - **Quick start** — single `npx agent-token-meter` command with the prerequisite called out explicitly
+  - **Full agentic setup (one-time per project)** — the combined `--install-hooks --install-protocol` command surfaced near the top instead of buried, with reversal commands listed inline
+  - **Alternate install methods** — `npm i -g` and source-clone, collapsed into compact code blocks
+  - **Heads-up about the npm-page install snippet** — the npm-default-snippet footgun is now a labeled subsection (was a blockquote, easy to skim past), with a recovery path for users who already ran `npm i agent-token-meter` and find the command missing on PATH
+- **Threshold hooks and Agent Protocol sections** retain their behavioral explanations but no longer duplicate the install commands — those live in the new top-of-install structure.
+
+### Why
+The package gets ~500 weekly downloads. The most common point of friction for a new user is the install path, and the npm-page default snippet (`npm i agent-token-meter`) genuinely doesn't make the CLI binary available — a footgun outside our control. v1.4.3 doesn't fix the npm snippet (we can't), but it puts the right command first, names the trap clearly, and tells the user what to do if they fell into it. Net effect: a smoother first impression for new users, no behavior change.
+
 ## [1.4.2] — 2026-05-19
 
 ### Fixed
@@ -150,6 +163,7 @@ No behavior change to read-only telemetry, session-file watching, or the cost-mu
 - Support for Claude Code via `~/.claude/projects/` JSONL logs.
 - `--install-hooks` / `--uninstall-hooks` for in-context threshold nudges at 50/75/90%.
 
+[1.4.3]: https://github.com/albertdobmeyer/agent-token-meter/releases/tag/v1.4.3
 [1.4.2]: https://github.com/albertdobmeyer/agent-token-meter/releases/tag/v1.4.2
 [1.4.1]: https://github.com/albertdobmeyer/agent-token-meter/releases/tag/v1.4.1
 [1.4.0]: https://github.com/albertdobmeyer/agent-token-meter/releases/tag/v1.4.0
