@@ -586,12 +586,12 @@ function buildPhaseBanner(m, cmds) {
     : m.turnsToCompact === Infinity
       ? `${GREEN}no pressure${RESET}`
       : m.turnsToCompact < 10
-        ? `${BG_RED}${WHITE}${BOLD} reset in ~${m.turnsToCompact} ${RESET}`
+        ? `${BG_RED}${WHITE}${BOLD} reset in ~${m.turnsToCompact} turns ${RESET}`
         : m.turnsToCompact < 50
-          ? `${RED}reset in ~${m.turnsToCompact}${RESET}`
+          ? `${RED}reset in ~${m.turnsToCompact} turns${RESET}`
           : m.turnsToCompact < 200
-            ? `${YELLOW}reset in ~${m.turnsToCompact}${RESET}`
-            : `${DIM}reset in ~${m.turnsToCompact}${RESET}`;
+            ? `${YELLOW}reset in ~${m.turnsToCompact} turns${RESET}`
+            : `${DIM}reset in ~${m.turnsToCompact} turns${RESET}`;
 
   // Dual-signal fragment: shows both context fill (budget) and overhead (drift).
   const signalFrag = m.overContext
@@ -640,10 +640,16 @@ function renderDashboard(metrics, session, rc, profile, hud = {}) {
   const zone = reasoningZone(m.contextPct);
   const zoneTag = `${zone.color}[${zone.name}]${RESET}`;
 
-  // Header
+  // Header — prefer the cwd's basename as a friendly project name; fall back to
+  // Claude Code's encoded form (B:--path--like--this) only when watching a
+  // session outside the current cwd (e.g. --all-projects mode).
   const shortId = sessionShortId(session?.filePath);
   const projRaw = session?.project || "";
-  const proj = projRaw.length > 40 ? "…" + projRaw.slice(-39) : projRaw;
+  const cwdBase = path.basename(process.cwd() || "");
+  const cwdEncoded = cwdBase.replace(/[/\\:]/g, "-");
+  const proj = (cwdBase && projRaw.endsWith(cwdEncoded))
+    ? cwdBase
+    : (projRaw.length > 40 ? "…" + projRaw.slice(-39) : projRaw);
   const header = `${BOLD}${CYAN} Agent Token Meter ${RESET}${DIM}v${VERSION}${RESET} ${DIM}·${RESET} ${DIM}${profile.name}${RESET}`;
   const subHeader = (proj || shortId)
     ? ` ${DIM}${[proj, shortId].filter(Boolean).join(" · ")}${RESET}`
@@ -690,14 +696,15 @@ function renderDashboard(metrics, session, rc, profile, hud = {}) {
     clearSection = lines;
   }
 
-  // WHAT TO HANDOFF — one-line schema reminder during HANDOFF/RESET.
-  // The full schema lives in AGENT-PROTOCOL.md; the dashboard just
-  // surfaces the section names so the human knows what to expect.
+  // HANDOFF SECTIONS — surfaces the schema during HANDOFF/RESET phases as a
+  // proper section (not a row), so it visually reads as a teaching aid, not
+  // data. Full schema lives in AGENT-PROTOCOL.md.
   let handoffSection = null;
   if (m.phase.name === "HANDOFF" || m.phase.name === "RESET") {
     handoffSection = [
       sepLight,
-      ` ${DIM}handoff${RESET}      ${DIM}mission · constraints · decisions · open · next · files · avoid${RESET}`,
+      ` ${DIM}HANDOFF SECTIONS${RESET}`,
+      ` ${DIM}mission · constraints · decisions · open · next · files · avoid${RESET}`,
     ];
   }
 
@@ -728,7 +735,10 @@ function renderDashboard(metrics, session, rc, profile, hud = {}) {
     header,
     subHeader,
     sepHeavy,
-    ` ${DIM}MULTIPLIER${RESET}   ${multStyled}${accelArrow ? " " + accelArrow : ""} ${zoneTag}   ${BOLD}${fmtCost(m.avgCostPerTurn)}${RESET} ${DIM}now${RESET}   ${DIM}${fmtCost(m.baselineCostPerCall)} fresh${RESET}`,
+    // MULTIPLIER line: pure cost signal (×N + dollar deltas). The reasoning-zone
+    // tag lives only on the context-bar line two rows below — one axis per line
+    // keeps the scan clean.
+    ` ${DIM}MULTIPLIER${RESET}   ${multStyled}${accelArrow ? " " + accelArrow : ""}   ${BOLD}${fmtCost(m.avgCostPerTurn)}${RESET} ${DIM}now${RESET}   ${DIM}${fmtCost(m.baselineCostPerCall)} fresh${RESET}`,
     ` ${buildPhaseBanner(m, cmds)}`,
     sepHeavy,
     ` ${DIM}NOW${RESET}${compactionAnnotation}`,
@@ -1195,8 +1205,11 @@ function main() {
       ms: 5000,
     });
   }
-  const watchingLabel = scopeActive ? process.cwd() : (session.project || "global");
-  startupSlides.push({ text: `watching: ${watchingLabel} · ${startupShortId}`, ms: 4000 });
+  // The "watching:" slide used to appear here. Removed in v1.4 — the header
+  // line 2 now shows the friendly project basename + short session id, which
+  // is the same info less verbosely. Keep the other slides (follow mode,
+  // rollover hints, multi-session indicators) — they carry information the
+  // header doesn't.
   if (followMode) {
     startupSlides.push({
       text: `follow mode on · switches to newest ${scopeWord} after 30s idle`,
