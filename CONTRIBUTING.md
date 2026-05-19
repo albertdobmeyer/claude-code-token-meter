@@ -80,10 +80,28 @@ Releases publish via GitHub Actions on a `v*` tag push. No npm tokens ever touch
 
 ```bash
 # Bump the version (patch / minor / major) — creates a commit and tag
-npm version patch -m "Release v%s"
+npm version patch -m "Release v%s" --sign-git-tag
 
 # Push both the commit and the tag. The tag push triggers publish.yml.
 git push --follow-tags origin main
+```
+
+The `--sign-git-tag` flag tells `npm version` to GPG/SSH-sign the release tag using your configured `user.signingkey`. Combined with the SLSA provenance attached by the publish workflow, this creates an end-to-end signed chain: signed tag → CI verifies tag matches `package.json` → npm `--provenance` ties the tarball to that exact commit. Consumers verify via `git tag --verify v<x.y.z>` and `npm audit signatures`.
+
+**One-time signing setup** (per maintainer):
+
+```bash
+# Generate or use an existing GPG/SSH key, then:
+git config --global user.signingkey <key-id>
+git config --global commit.gpgsign true     # optional but recommended
+git config --global tag.gpgsign true        # required for npm version --sign-git-tag
+```
+
+Or, to permanently default to signed tags (so you don't need `--sign-git-tag` each release):
+
+```bash
+git config --global tag.gpgsign true
+npm config set sign-git-tag true            # npm reads this for `npm version`
 ```
 
 Watch the run under **Actions** in GitHub. The workflow:

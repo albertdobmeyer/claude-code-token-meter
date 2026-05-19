@@ -1,20 +1,29 @@
 #!/usr/bin/env node
 /**
- * Token Meter Threshold Hook for Claude Code
+ * Token Meter Hook for Claude Code (v1.4 — multi-event)
  *
- * Ultra-lean PostToolUse hook. Runs after every tool call but stays
- * silent unless a context threshold (50%, 75%, 90%) is crossed.
- * Each threshold fires ONCE per session. Compaction re-arms them.
+ * Single hook script handles multiple event types via payload.hook_event_name:
+ *
+ *   PostToolUse  → threshold nudges at 50/75/90% context fill
+ *   SessionStart → bootstrap-from-handoff nudge if a recent handoff exists in cwd
+ *   PreCompact   → reserved (no-op in v1.4)
+ *   PostCompact  → explicit compaction nudge; suppresses heuristic detection for 60s
  *
  * Install:   npx agent-token-meter --install-hooks
  * Remove:    npx agent-token-meter --uninstall-hooks
+ *
+ * State is keyed per session_id at ~/.claude/token-meter-hook-state.json.
  */
+
 import fs from "fs";
 import path from "path";
 import os from "os";
 
 const COMPACT_BUFFER = 33_000;
 const STATE = path.join(os.homedir(), ".claude", "token-meter-hook-state.json");
+const HEURISTIC_SUPPRESS_MS = 60_000;
+const BOOTSTRAP_MAX_AGE_HOURS = 7 * 24;
+const BOOTSTRAP_MAX_USER_TURNS = 2;
 
 const LIMITS = {
   "claude-opus-4-7": 1_000_000,
@@ -23,20 +32,33 @@ const LIMITS = {
   "claude-haiku-4-5": 200_000,
 };
 const DEFAULT_LIMIT = 1_000_000;
-
 const CACHE_RATES = { opus: 1.5, sonnet: 0.3, haiku: 0.08 };
 
+// Threshold messages map context fill to reasoning-degradation milestones.
+// Each takes a `ctx` object { shortId, tax } and returns the message string.
 const THRESHOLDS = [
-  { pct: 50, msg: "Context 50%. Plan a handoff point — write key decisions to a file." },
-  { pct: 75, msg: "Context 75%. Write your plan/findings to a file now. Prepare to /clear." },
-  { pct: 90, fn: (tax) => `Context 90%. ~$${tax}/call context tax. /clear now to avoid quadrupled costs.` },
+  {
+    pct: 50,
+    fn: (ctx) => `Context 50%. Reasoning still sharp — start drafting the handoff at ./handoff-${ctx.shortId}.md (per AGENT-PROTOCOL.md if present).`,
+  },
+  {
+    pct: 75,
+    fn: (ctx) => `Context 75%. Drift zone — finish ./handoff-${ctx.shortId}.md now while curation is still cheap. Prepare to request /clear from the user.`,
+  },
+  {
+    pct: 90,
+    fn: (ctx) => `Context 90%. ~$${ctx.tax}/call tax + attention degrading. Confirm ./handoff-${ctx.shortId}.md is complete, then ask the user to /clear and reload by saying "continue from ./handoff-${ctx.shortId}.md".`,
+  },
 ];
 
 // ── I/O helpers ──────────────────────────────────────────────────────
 
 function emit(text) {
   process.stdout.write(JSON.stringify({
-    hookSpecificOutput: { additionalContext: `[Token Meter] ${text}` },
+    hookSpecificOutput: {
+      hookEventName: process.env.HOOK_EVENT_NAME || "PostToolUse",
+      additionalContext: `[Token Meter] ${text}`,
+    },
   }));
 }
 
@@ -49,12 +71,6 @@ function saveState(s) {
   try { fs.writeFileSync(STATE, JSON.stringify(s)); } catch {}
 }
 
-// ── Hook payload from stdin ──────────────────────────────────────────
-// Claude Code passes { session_id, transcript_path, cwd, tool_name, ... }
-// as JSON on stdin. Reading fd 0 synchronously works because the payload
-// is already buffered by the time the hook runs. Skip if stdin is a TTY
-// (manual testing) to avoid blocking.
-
 function readHookPayload() {
   if (process.stdin.isTTY) return null;
   try {
@@ -65,8 +81,6 @@ function readHookPayload() {
     return null;
   }
 }
-
-// ── Session discovery fallback ───────────────────────────────────────
 
 function findSessionByMtime() {
   const dir = path.join(os.homedir(), ".claude", "projects");
@@ -82,7 +96,7 @@ function findSessionByMtime() {
           const mt = fs.statSync(fp).mtimeMs;
           if (!best || mt > best.mt) best = { path: fp, mt };
         }
-      } catch { /* unreadable dir */ }
+      } catch { /* unreadable */ }
     }
   } catch { /* no projects dir */ }
   return best?.path;
@@ -93,19 +107,23 @@ function sessionIdFromPath(filePath) {
   return base.replace(/\.jsonl$/, "");
 }
 
-// ── Quick JSONL parse (only extracts what we need) ───────────────────
-
 function parseQuick(filePath) {
   let content;
   try { content = fs.readFileSync(filePath, "utf8"); }
   catch { return null; }
 
-  let model = "", ctx = 0, prevCtx = 0, compactions = 0;
+  let model = "", ctx = 0, prevCtx = 0, compactions = 0, userTurns = 0;
 
   for (const line of content.split("\n")) {
     if (!line) continue;
     try {
       const obj = JSON.parse(line);
+      if (obj.type === "user" && obj.message?.role === "user") {
+        if (!Array.isArray(obj.message.content) || !obj.message.content.some(c => c?.type === "tool_result")) {
+          userTurns++;
+        }
+        continue;
+      }
       if (obj.type !== "assistant" || !obj.message?.usage) continue;
       const u = obj.message.usage;
       const c = (u.input_tokens || 0) +
@@ -116,13 +134,11 @@ function parseQuick(filePath) {
       if (prevCtx > 0 && c < prevCtx * 0.8 && prevCtx - c > 5000) compactions++;
       prevCtx = c;
       ctx = c;
-    } catch { /* partial line or bad JSON */ }
+    } catch { /* partial line */ }
   }
 
-  return ctx > 0 ? { model, ctx, compactions } : null;
+  return ctx > 0 ? { model, ctx, compactions, userTurns } : null;
 }
-
-// ── Lookups ──────────────────────────────────────────────────────────
 
 function usableLimit(model) {
   for (const [k, v] of Object.entries(LIMITS)) {
@@ -138,60 +154,184 @@ function cacheRate(model) {
   return 1.5;
 }
 
-// ── Main ─────────────────────────────────────────────────────────────
-
-const payload = readHookPayload();
-// Authoritative session from Claude Code's payload; fallback to mtime scan.
-const sessionPath = payload?.transcript_path || findSessionByMtime();
-if (!sessionPath) process.exit(0);
-
-const sessionId = payload?.session_id || sessionIdFromPath(sessionPath);
-
-// State is keyed by session_id so concurrent Claude Code instances don't
-// suppress each other's threshold firings.
-const allState = loadState();
-if (!allState.sessions) allState.sessions = {};
-// Migrate legacy state format (flat, single-session blob) on load.
-if (allState.session) {
-  const legacyId = sessionIdFromPath(allState.session);
-  if (legacyId && !allState.sessions[legacyId]) {
-    allState.sessions[legacyId] = {
-      fired: allState.fired || [], compactions: allState.compactions || 0,
-    };
+function getSessionState(allState, sessionId) {
+  if (!allState.sessions) allState.sessions = {};
+  // Legacy migration (pre-1.2.4 flat format)
+  if (allState.session) {
+    const legacyId = sessionIdFromPath(allState.session);
+    if (legacyId && !allState.sessions[legacyId]) {
+      allState.sessions[legacyId] = {
+        fired: allState.fired || [],
+        compactions: allState.compactions || 0,
+      };
+    }
+    delete allState.session;
+    delete allState.fired;
+    delete allState.compactions;
   }
-  delete allState.session;
-  delete allState.fired;
-  delete allState.compactions;
+  if (!allState.sessions[sessionId]) {
+    allState.sessions[sessionId] = { fired: [], compactions: 0 };
+  }
+  return allState.sessions[sessionId];
 }
-const state = allState.sessions[sessionId] || { fired: [], compactions: 0 };
-allState.sessions[sessionId] = state;
 
-const m = parseQuick(sessionPath);
-if (!m) { saveState(allState); process.exit(0); }
+// ── Event handlers ──────────────────────────────────────────────────
 
-const limit = usableLimit(m.model);
-const pct = (m.ctx / limit) * 100;
+function handlePostToolUse(payload) {
+  const sessionPath = payload.transcript_path || findSessionByMtime();
+  if (!sessionPath) process.exit(0);
 
-// Compaction detected — re-arm thresholds above current fill
-if (m.compactions > (state.compactions || 0)) {
-  state.compactions = m.compactions;
-  state.fired = (state.fired || []).filter(t => t <= pct);
+  const sessionId = payload.session_id || sessionIdFromPath(sessionPath);
+  const shortId = sessionId.slice(0, 8);
+
+  const allState = loadState();
+  const state = getSessionState(allState, sessionId);
+
+  const m = parseQuick(sessionPath);
+  if (!m) { saveState(allState); process.exit(0); }
+
+  const limit = usableLimit(m.model);
+  const pct = (m.ctx / limit) * 100;
+
+  // Heuristic compaction detection — suppressed for 60s after an explicit PostCompact event
+  const recentExplicitCompact = state.lastCompactEventMs &&
+    (Date.now() - state.lastCompactEventMs) < HEURISTIC_SUPPRESS_MS;
+
+  if (!recentExplicitCompact && m.compactions > (state.compactions || 0)) {
+    state.compactions = m.compactions;
+    state.fired = (state.fired || []).filter(t => t <= pct);
+    saveState(allState);
+    emit(`Compaction detected (${m.compactions}x). Context reset to ${pct.toFixed(0)}%. Position bias reset to fresh; thresholds re-armed. Write a fresh ./handoff-${shortId}.md now — the auto-summary is a fallback, not a substitute.`);
+    process.exit(0);
+  }
+
+  // Threshold checks — emit at most one per invocation
+  for (const t of THRESHOLDS) {
+    if (pct >= t.pct && !(state.fired || []).includes(t.pct)) {
+      state.fired = [...(state.fired || []), t.pct];
+      const tax = (m.ctx / 1e6 * cacheRate(m.model)).toFixed(2);
+      const ctx = { shortId, tax };
+      saveState(allState);
+      emit(t.fn(ctx));
+      process.exit(0);
+    }
+  }
+
   saveState(allState);
-  emit(`Compaction detected (${m.compactions}x). Context reset to ${pct.toFixed(0)}%. Thresholds re-armed.`);
+}
+
+function handleSessionStart(payload) {
+  const sessionId = payload.session_id || "";
+  const cwd = payload.cwd;
+  if (!cwd) process.exit(0);
+
+  const allState = loadState();
+  const state = getSessionState(allState, sessionId);
+
+  // Bootstrap fires once per session
+  if (state.bootstrapFired) {
+    saveState(allState);
+    process.exit(0);
+  }
+
+  // Find the most recent handoff-*.md in cwd, modified within BOOTSTRAP_MAX_AGE_HOURS
+  let handoff = null;
+  try {
+    const files = fs.readdirSync(cwd);
+    for (const f of files) {
+      if (!f.startsWith("handoff-") || !f.endsWith(".md")) continue;
+      const fp = path.join(cwd, f);
+      try {
+        const stat = fs.statSync(fp);
+        if (!stat.isFile()) continue;
+        const ageMs = Date.now() - stat.mtimeMs;
+        const ageHours = ageMs / 3_600_000;
+        if (ageHours > BOOTSTRAP_MAX_AGE_HOURS) continue;
+        if (!handoff || stat.mtimeMs > handoff.mtimeMs) {
+          handoff = { file: f, mtimeMs: stat.mtimeMs, ageHours };
+        }
+      } catch { /* unreadable */ }
+    }
+  } catch { /* dir read failed */ }
+
+  if (!handoff) {
+    saveState(allState);
+    process.exit(0);
+  }
+
+  // Verify session is fresh — check transcript for low user-turn count
+  if (payload.transcript_path) {
+    const m = parseQuick(payload.transcript_path);
+    if (m && m.userTurns > BOOTSTRAP_MAX_USER_TURNS) {
+      // Session isn't actually fresh — skip the bootstrap nudge
+      state.bootstrapFired = true;
+      saveState(allState);
+      process.exit(0);
+    }
+  }
+
+  state.bootstrapFired = true;
+  saveState(allState);
+
+  const ageStr = handoff.ageHours < 1
+    ? `${Math.round(handoff.ageHours * 60)}m ago`
+    : handoff.ageHours < 24
+      ? `${Math.round(handoff.ageHours)}h ago`
+      : `${Math.round(handoff.ageHours / 24)}d ago`;
+
+  emit(`Fresh session in project with recent handoff (./${handoff.file}, ${ageStr}). Read it before continuing — it contains the prior session's mission, decisions, and open threads.`);
+}
+
+function handlePostCompact(payload) {
+  const sessionPath = payload.transcript_path;
+  if (!sessionPath) process.exit(0);
+
+  const sessionId = payload.session_id || sessionIdFromPath(sessionPath);
+  const shortId = sessionId.slice(0, 8);
+
+  const m = parseQuick(sessionPath);
+  if (!m) process.exit(0);
+
+  const limit = usableLimit(m.model);
+  const pct = (m.ctx / limit) * 100;
+
+  const allState = loadState();
+  const state = getSessionState(allState, sessionId);
+  state.compactions = (state.compactions || 0) + 1;
+  state.fired = (state.fired || []).filter(t => t <= pct);
+  state.lastCompactEventMs = Date.now();
+  saveState(allState);
+
+  emit(`Compaction detected (${state.compactions}x). Context reset to ${pct.toFixed(0)}%. Position bias reset to fresh; thresholds re-armed. Write a fresh ./handoff-${shortId}.md now — the auto-summary is a fallback, not a substitute.`);
+}
+
+function handlePreCompact(payload) {
+  // Reserved for v1.5. In v1.4 we exit silently.
   process.exit(0);
 }
 
-// Check thresholds — emit at most one per invocation
-for (const t of THRESHOLDS) {
-  if (pct >= t.pct && !(state.fired || []).includes(t.pct)) {
-    state.fired = [...(state.fired || []), t.pct];
-    const tax = (m.ctx / 1e6 * cacheRate(m.model)).toFixed(2);
-    const msg = t.fn ? t.fn(tax) : t.msg;
-    saveState(allState);
-    emit(msg);
-    process.exit(0);
-  }
-}
+// ── Main ─────────────────────────────────────────────────────────────
 
-// No threshold crossed — silent
-saveState(allState);
+const payload = readHookPayload();
+if (!payload) process.exit(0);
+
+const event = payload.hook_event_name || "PostToolUse";
+process.env.HOOK_EVENT_NAME = event;
+
+switch (event) {
+  case "PostToolUse":
+    handlePostToolUse(payload);
+    break;
+  case "SessionStart":
+    handleSessionStart(payload);
+    break;
+  case "PostCompact":
+    handlePostCompact(payload);
+    break;
+  case "PreCompact":
+    handlePreCompact(payload);
+    break;
+  default:
+    // Unknown event — exit silently for forward compatibility
+    process.exit(0);
+}

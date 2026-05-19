@@ -2,3 +2,14 @@ node_modules/
 .env
 *.tgz
 .DS_Store
+
+# Zero-deps package — no lockfile needed
+package-lock.json
+
+# Subagent worktree state from parallel implementation runs
+.claude/
+
+# Local planning artifacts — kept untracked, not shipped
+ROADMAP.md
+MISSION-PLAN.md
+SPEC-stream-*.md

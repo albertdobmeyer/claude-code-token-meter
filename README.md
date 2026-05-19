@@ -4,31 +4,41 @@
 
 **A speedometer for your context window.** Zero dependencies. Single file. Answers one question: *should I reset my context right now?*
 
-AI coding agents bill by tokens, and conversations accumulate cost **quadratically** — each message resends the entire history. A 100-turn conversation doesn't cost 10x more than a 10-turn conversation. It costs **50x** more. Most developers have no real-time visibility into this.
+AI coding agents bill linearly per token — but session cost grows **quadratically, not just linearly**, because every turn resends the entire history. A 100-turn conversation doesn't cost 10× a 10-turn one. It costs roughly **50×**. And reasoning quality degrades well before the context window actually fills — the model attends more weakly to the middle of a long conversation than to its start and recent tail, so drift sets in long before you hit any limit. Most developers have no real-time visibility into either.
 
-Agent Token Meter watches your coding agent's session and shows you the burn rate, acceleration, and estimated calls until auto-compaction — so you know *when* to act, not just how much you've spent after the fact.
+Agent Token Meter watches your coding agent's session and shows you the burn rate, acceleration, and estimated calls until auto-compaction — so you know *when* to curate a handoff and reset, not just how much you've spent after the fact.
 
 ![Agent Token Meter dashboard](https://raw.githubusercontent.com/albertdobmeyer/agent-token-meter/main/agent-token-meter-terminal-screenshot.png)
 
 ```
- Agent Token Meter v1.2.0 · Claude Code · B--A5DS-HQ-agent-token-meter · 32891718
+ Agent Token Meter v1.4.0 · Claude Code
+ B--A5DS-HQ-agent-token-meter · 32891718
 ════════════════════════════════════════════════════════════
- MULTIPLIER   ×7.6 ↑        $0.52 now   $0.04 fresh
- BUILD — productive zone · context 22% · reset in ~442
+ MULTIPLIER   ×7.6 ↑ [DRIFT]   $0.52 now   $0.04 fresh
+ BUILD — productive zone, reasoning sharp · fill 78% (overhead 22%) · reset in ~442
 ════════════════════════════════════════════════════════════
- NOW
- context      212.5k / 967.0k         22%
+ NOW (post-compaction × 1)
+ context  ███████████████████████░░░░░░░  78% · 12 pages [DRIFT]
  burn         +1706 tok/call ↑
  last turn    212.5k in · 231 out · tool_use
 ────────────────────────────────────────────────────────────
  IF YOU CLEAR
  per call     save $0.27
+ reasoning    DRIFT → SHARP
  next 20      save ~$5.48
- steps        write handoff → /clear → reload with plan
+ steps        curate handoff → /clear → reload (lands at position 0)
+────────────────────────────────────────────────────────────
+ WHAT TO HANDOFF
+ mission      one sentence — session goal
+ decisions    what should NOT be re-litigated
+ open         in-flight work with file:line refs
+ next         the literal next concrete step
+ avoid        things tried that didn't work
 ────────────────────────────────────────────────────────────
  SESSION
  spend        $75.93 · 16 turns · 11h 55m · $6.36/hr
  cache        97% hit · saved $350.12 · 27.7M in · 286.2k out
+ output       286.2k total · 1.0% of inputs
  alt models   Sonnet 4.6 $15.19   Kimi K2.5 $5.35
 ════════════════════════════════════════════════════════════
  Watching · Ctrl+C to exit
@@ -48,11 +58,24 @@ Adding a new agent requires only a profile object and a parser function. See the
 
 ## Install
 
+The fastest path (no install at all — recommended):
+
 ```bash
 npx agent-token-meter
 ```
 
-Or clone and run directly:
+`npx` downloads and runs the latest version on demand. Re-runs use a local cache. Nothing pollutes your global packages.
+
+If you'd rather have the command available system-wide:
+
+```bash
+npm i -g agent-token-meter
+agent-token-meter            # now runs from anywhere
+```
+
+> **Note:** the npm landing page suggests `npm i agent-token-meter` (without `-g`). That command works, but because this is a CLI-only package it just drops the binary into `./node_modules/.bin/` of whatever directory you're in — your shell won't find it on PATH. Use `npx` or the global install above instead.
+
+To clone and run directly from source:
 
 ```bash
 git clone https://github.com/albertdobmeyer/agent-token-meter
@@ -60,11 +83,11 @@ cd agent-token-meter
 node token-meter.mjs
 ```
 
-**Requirements:** Node.js 18+ (no other dependencies).
+**Requirements:** Node.js 18+ (zero dependencies).
 
 ## Threshold hooks (agent integration)
 
-The token meter can nudge your AI agent directly inside the conversation. Instead of polling or injecting on every turn, it uses **threshold triggers** — the agent gets a one-line system reminder only when context crosses a critical boundary. Zero tokens wasted otherwise.
+The token meter can nudge your AI agent directly inside the conversation. Instead of polling or injecting on every turn, it uses **threshold triggers** — the agent gets a one-line system reminder only when context crosses a reasoning-degradation boundary. The 50/75/90% marks correspond to *curation is still cheap*, *drift is setting in*, and *attention degraded — cost biting hard*. Zero tokens injected when below those marks.
 
 ### Install hooks
 
@@ -80,12 +103,12 @@ Currently supported for: **Claude Code**.
 
 | Threshold | Nudge |
 |---|---|
-| **50%** | `[Token Meter] Context 50%. Plan a handoff point — write key decisions to a file.` |
-| **75%** | `[Token Meter] Context 75%. Write your plan/findings to a file now. Prepare to /clear.` |
-| **90%** | `[Token Meter] Context 90%. ~$X.XX/call context tax. /clear now to avoid quadrupled costs.` |
-| **Compaction** | `[Token Meter] Compaction detected (Nx). Context reset to X%. Thresholds re-armed.` |
+| **50%** | `[Token Meter] Context 50%. Reasoning still sharp — start drafting the handoff (decisions, constraints, open threads).` |
+| **75%** | `[Token Meter] Context 75%. Drift zone — finish the handoff file now while curation is still cheap. Prepare to /clear.` |
+| **90%** | `[Token Meter] Context 90%. ~$X.XX/call tax + attention degrading. /clear and reload from the handoff — don't let /compact summarize under pressure.` |
+| **Compaction** | `[Token Meter] Compaction detected (Nx). Context reset to X%. Position bias reset to fresh; thresholds re-armed.` |
 
-Each threshold fires **once per session**. When auto-compaction happens, thresholds above the new fill level are re-armed.
+Each threshold fires **once per session**. When auto-compaction happens, thresholds above the new fill level are re-armed. The nudges aren't budget alarms — they're cues at the points where the cost of *not* curating starts to outweigh the cost of curating.
 
 ### How it works
 
@@ -116,9 +139,85 @@ Removes the hook script, state file, and settings entry. Your existing hooks are
 | **Display** | Full real-time dashboard in split terminal | One-line system reminder |
 | **Frequency** | Continuous live updates | Only at 50/75/90% thresholds |
 | **Token cost** | Zero (separate process) | ~4 lines total across entire session |
-| **Purpose** | Monitor burn rate, plan workflow | Nudge the agent to be token-frugal |
+| **Purpose** | Spot the curation moment, monitor burn rate | Nudge the agent to curate a handoff at reasoning-degradation moments |
 
 Use both together: the dashboard for your situational awareness, the hooks for the agent's.
+
+## Agent Protocol — the contract between hook and agent
+
+The threshold hook fires a one-line system reminder. That reminder is *imperative* but compact — and a frontier model has to infer the rest: what to write, where to save it, what to tell the human at 90%, how the next session should pick up. v1.4 closes that gap with a bundled **Agent Protocol** document.
+
+### What it is
+
+`AGENT-PROTOCOL.md` is a one-page markdown file that lives at the project root. It tells the agent exactly:
+
+- The **handoff file schema** (7 sections: Mission, Constraints, Decisions, Open threads, Next step, Files touched, Avoid)
+- The **filename convention** (`./handoff-{shortId}.md`)
+- The **exact phrase to say to the user at 90%** ("Please run `/clear`, then reload by saying: 'continue from ./handoff-{id}.md'")
+- The **fallback procedure** when auto-compaction fires anyway (write a fresh handoff from post-compaction state)
+- The **bootstrap protocol** when a fresh session sees a prior handoff (read it first, confirm with user, then resume)
+- An optional **handoff-vs-memory decision rubric** for projects using Claude Code's auto-memory system
+
+### How to install
+
+```bash
+# Full setup — protocol file + CLAUDE.md import line
+npx agent-token-meter --install-protocol
+
+# Just the protocol file, no CLAUDE.md edit
+npx agent-token-meter --install-protocol --no-claude-md
+
+# Print the protocol to stdout for piping (zero side effects)
+npx agent-token-meter --emit-agent-protocol | clip   # Windows
+npx agent-token-meter --emit-agent-protocol | pbcopy # macOS
+
+# Combined install — hooks + protocol in one command
+npx agent-token-meter --install-hooks --install-protocol
+
+# Remove cleanly
+npx agent-token-meter --uninstall-protocol
+```
+
+When you run `--install-protocol`, the meter writes `AGENT-PROTOCOL.md` into your project root and adds a single import line to your `CLAUDE.md`:
+
+```markdown
+<!-- agent-token-meter:protocol-start -->
+## Token meter protocol
+This project uses agent-token-meter. Read @AGENT-PROTOCOL.md and follow it when you see `[Token Meter]` system reminders.
+<!-- agent-token-meter:protocol-end -->
+```
+
+Claude Code auto-loads `CLAUDE.md` and follows `@imports`, so the protocol lands in the agent's context at session start — and survives `/compact` because CLAUDE.md is re-injected from disk after compaction.
+
+### What changes for the agent
+
+Without the protocol, the 75% nudge says *"finish the handoff file now"* — the agent has to invent what "the handoff file" contains. With the protocol installed, the agent reads the document at session start and knows the 7-section schema, the filename convention, and the exact request-to-clear phrasing. The nudges themselves remain compact; they reference the protocol but don't repeat it.
+
+### What changes for the human
+
+The setup cost is one command. After that, an ideal session looks like:
+
+1. You start a session and ignore the meter for the first 50% of context
+2. At 50%, the agent (not you) recognizes the nudge and begins drafting `./handoff-{shortId}.md`
+3. At 75%, the agent finalizes the file
+4. At 90%, the agent stops, confirms the handoff is complete, and tells you the literal phrase to use: *"Please run /clear, then reload by saying: 'continue from ./handoff-{id}.md'"*
+5. You run `/clear` and reload as instructed
+6. The next session's `SessionStart` hook fires a one-line read-this-first nudge pointing at the handoff
+7. The agent reads the handoff, confirms with you, and resumes exactly where it left off
+
+If you never read the README mid-session — that's the design goal.
+
+### Multi-event hooks
+
+Installing hooks in v1.4 registers three event handlers, not just one:
+
+| Event | What we do |
+|---|---|
+| `PostToolUse` | Existing threshold nudges (50/75/90%) and heuristic compaction detection |
+| `SessionStart` | Bootstrap-from-handoff nudge if a recent `./handoff-*.md` is found in cwd |
+| `PostCompact` | Explicit compaction nudge with re-arm + fresh-handoff instruction |
+
+Older Claude Code versions that don't fire `SessionStart` or `PostCompact` fall back to the heuristic path — no breakage, just slightly lazier signal timing.
 
 ## Usage
 
@@ -160,7 +259,7 @@ The meter watches **one session at a time, scoped to your current working direct
 The dashboard header shows both the project directory name and the short session id:
 
 ```
-Agent Token Meter v1.2.0 · Claude Code · B--A5DS-HQ-agent-token-meter · 6cfb4866
+Agent Token Meter v1.4.0 · Claude Code · B--A5DS-HQ-agent-token-meter · 6cfb4866
 ```
 
 This is the primary disambiguation signal — you match the project string (with the drive letter and path segments) against your terminal's `cwd` to confirm the numbers belong to the conversation you're thinking about. The short session id is the tiebreaker if multiple terminals are open in the same project; Claude Code's `/status` command shows the same id.
@@ -220,7 +319,7 @@ npx agent-token-meter --all                   # cost summary across every sessio
 
 ## Why this exists
 
-Most coding agents have some form of cost or context display, but none tell you the *rate of change* — which is what actually matters for making decisions.
+Most coding agents have some form of cost or context display, but none tell you the *rate of change* — which is what actually matters for making decisions. And none surface *reasoning-degradation cues* — the points where your context is filling not just expensively, but counterproductively.
 
 | Question | Built-in | **Agent Token Meter** |
 |---|:---:|:---:|
@@ -230,10 +329,11 @@ Most coding agents have some form of cost or context display, but none tell you 
 | Is the rate increasing? | | **Yes** |
 | When will compaction trigger? | | **Yes** |
 | Did compaction happen? | | **Yes** |
-| Should I reset context now? | | **Yes** |
+| Am I past the drift zone (reasoning quality cliff)? | | **Yes** |
+| Is now the right moment to curate a handoff? | | **Yes** |
 | How much does my history cost per call? | | **Yes** |
 | How much would resetting save me? | | **Yes** |
-| Can the agent nudge itself? | | **Yes** |
+| Can the agent nudge itself at the curation moment? | | **Yes** |
 
 ## Reading the display
 
@@ -347,9 +447,15 @@ Add or override providers via config file (location depends on agent):
 }
 ```
 
-## The quadratic cost problem
+## Why short sessions win
 
-Every agent message sends the **entire conversation history** as input. If each turn adds ~2k tokens of context:
+Two independent reasons to curate a handoff early instead of riding a long conversation into auto-compaction. Either one alone justifies the workflow; together they make it obvious.
+
+### 1. Cumulative cost is quadratic, even when per-token pricing is flat
+
+Providers bill linearly per token. But every agent message sends the **entire conversation history** as input, so the total tokens processed across N turns is `1 + 2 + … + N = N(N+1)/2`. That's quadratic in N, not linear — even though no pricing tier changed. The bite isn't in any single call's sticker; it's the cumulative drag of carrying history forward.
+
+If each turn adds ~2k tokens of context:
 
 | Turns | Context sent this turn | Cumulative input billed |
 |---|---|---|
@@ -357,9 +463,65 @@ Every agent message sends the **entire conversation history** as input. If each 
 | 50 | 100k | 2.55M |
 | 100 | 200k | 10.1M |
 
-That's not linear growth. It's `n(n+1)/2` — and it's why a long session can cost 10-50x what you'd expect.
+A 100-turn session bills ~50× a 10-turn one, not 10×. **Short sessions win even when nothing about the pricing tier changes.**
 
-Agent Token Meter makes this visible in real-time. The workflow advisor translates abstract context growth into a concrete dollar-per-call **context tax** and tells you exactly when the cost of continuing exceeds the cost of writing a handoff and starting fresh.
+Prompt caching is a partial mitigant, not a refutation. Cached reads cost ~10% of fresh input ($1.50/M vs $15/M on Opus), so a session with a 97% cache hit rate runs at roughly a 10× discount on the input bill. But the *shape* doesn't change: per-call cost still grows linearly with `n` (you read the whole history every turn, even if cheaply), so cumulative spend stays O(n²) — just with a smaller coefficient. And the cache TTL is ~5 minutes; idle past that and you're paying full price on the next call.
+
+The meter shows both sides honestly. The SESSION zone reports cache hit rate and net cache savings alongside the raw spend — so the discount is visible, but so is the underlying curve.
+
+### 2. Reasoning quality degrades before recall does — and a curated handoff resets position bias
+
+The single most important distinction in current long-context LLM behavior is the gap between **retrieval reach** and **active reasoning workspace** — these scale very differently. Modern frontier models (Opus 4.x, Sonnet 4.x) score near-perfect on needle-in-haystack benchmarks: they can quote anything from anywhere in a 1M-token window. But quoting is *referencing*, not *reasoning*. The active reasoning workspace — the slice over which the model maintains tight dependency tracking, global consistency, and coherent multi-step inference — is far smaller than the advertised context limit and degrades gradually as more material competes within it.
+
+Gary Capps' article [*The Hidden Constraint in LLM Systems*](./the-hidden-constraint.md) (May 2026) frames this precisely: large context windows behave like **searchable memory feeding a constrained reasoning workspace**, not uniformly active thought. The folk "first paragraph + last few pages" intuition is oversimplified, but it's still closer to the truth than the marketed "1M-token thinking" framing — and the distinction it points at is about *reasoning*, not *referencing*. The article ships with the package as a reference; its pages-based table mapping active reasoning budget to expected competence (1–3 pages: excellent; 25–40 pages: degrading; 75+: mostly retrieval behavior) is the most useful operating-zone guide for production use we've seen. See [`CREDITS.md`](./CREDITS.md) for full attribution.
+
+Two consequences matter especially for coding agents:
+
+- **Generated output competes for the same budget.** A model producing a long answer, a large diff, or verbose tool output occupies the same active workspace the input material is using. The budget isn't just consumed by what you sent — it's also consumed by what the model is producing right now.
+- **Dependency density matters more than raw size.** Ten pages of tightly-coupled code (variable relationships, cross-references, state transitions) stresses the workspace earlier than a hundred pages of loose reference docs. Coding sessions sit on the dense-dependency end of the curve.
+
+Layered on top, the canonical "Lost in the Middle" effect (Liu et al. 2023; RULER and NoLiMa follow-ups) shows that *within* whatever reasoning workspace exists, attention is U-shaped — the start and recent tail are weighted heavily, the middle underweighted. For coding agents this shows up as drift, not amnesia: subtle departures from earlier constraints, half-remembered decisions, mounting "I forgot we already tried that" moments. The state you care about is buried in the region the model is already attending to least.
+
+This is the sharper reason a curated handoff beats a long conversation — it isn't just shorter, it **resets position bias and recompacts the active workspace around what actually matters**. The decisions, constraints, and open threads you write down land at *position 0* in the fresh session, in the high-attention zone, and the workspace is no longer cluttered with dense interdependencies from a phase you've moved past. You're moving the important state back to where the model actually weighs it, in the form the model can actually use.
+
+The actionable consequence: **operate in the competence zone, not the tolerance zone.** The lower end of any model's capability range is where it's reliable; the upper end is where it *occasionally* succeeds under favorable conditions. A curated handoff at 50–75% keeps you in the competence zone; riding to 90%+ and trusting `/compact` puts you in the tolerance zone.
+
+### Why a written handoff beats `/compact`
+
+`/compact` is opaque, lossy, and non-deterministic. A handoff file is the opposite:
+
+- **Reviewable** — you read it before continuing
+- **Diffable** — version-controllable alongside the code it describes
+- **Deterministic** — same bootstrap every time you reload
+- **Selective** — you choose what survives, not the model
+
+There's a deeper problem with auto-compact, beyond the audit-trail argument: the model is summarizing its own conversation **under context pressure** — the exact moment its attention is most degraded. You're asking it to decide what matters at the moment it's least able to tell. A handoff you curate at 50–75% inverts this: you write the bootstrap while the agent's reasoning is still sharp, then reload into a fresh, position-bias-friendly session.
+
+This is the engineering-artifact argument, and it stands independently of either claim above: even if a future model fully eliminated mid-context reasoning drift, a written handoff would still be the better way to start the next session — for the same reason a commit message is better than running `git diff` from memory.
+
+### The operating discipline
+
+Both arguments point at the same workflow: **short, deliberate sessions, with handoff documents you curate while your context is still sharp — not summaries the model improvises once its attention is already degraded.** Agent Token Meter exists to surface the moment when that curation is still cheap, via the real-time per-call multiplier and the 50/75/90% threshold nudges.
+
+## Composing with Claude Code's memory system
+
+Claude Code ships with a per-project auto-memory system — `MEMORY.md` plus detail files at `~/.claude/projects/{project}/memory/`. That system uses the **same architectural pattern** as agent-token-meter, applied at a different timescale:
+
+|                              | agent-token-meter | Claude Code memory   |
+|------------------------------|-------------------|----------------------|
+| Scope                        | Within-session    | Across-session       |
+| Trigger to curate            | 50/75/90% fill    | Non-derivable facts  |
+| What lands at position 0 next | The handoff file (next session) | MEMORY.md (every session) |
+| Failure mode if you don't curate | `/compact` summarizes under pressure | Facts re-derived or lost |
+
+The two are **complementary**, not overlapping:
+
+- The handoff captures *in-flight task state* — relevant for one continuation, then archival
+- Memory captures *durable, non-derivable knowledge* — relevant for every future session in this project
+
+A sophisticated workflow uses both: at curation moments, sort what you're about to write down by lifespan. **If it would still be useful in a session three weeks from now in this same project, it's memory. If it's useful only for the next continuation, it's a handoff.** The bundled `AGENT-PROTOCOL.md` includes this rubric so the agent can apply it directly.
+
+Both tools inherit the same underlying claim from Gary Capps' [*The Hidden Constraint in LLM Systems*](./the-hidden-constraint.md): **retrieval feeding a constrained reasoning workspace** is the design pattern, not a quirk of any one tool. The meter is the within-session version of what Claude Code's memory system does across sessions.
 
 ## License
 

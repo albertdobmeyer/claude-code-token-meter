@@ -4,6 +4,49 @@ All notable changes to **agent-token-meter** are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] — 2026-05-18
+
+### Added
+- **`AGENT-PROTOCOL.md`** — bundled agent-facing protocol document specifying the handoff file schema (7 sections), filename convention (`./handoff-{shortId}.md`), exact request-to-clear phrasing, post-compaction fallback procedure, fresh-session bootstrap protocol, and handoff-vs-memory decision rubric. Installed into projects via the new `--install-protocol` flag; auto-loaded by the agent through `CLAUDE.md` `@import`.
+- **`protocol.mjs`** — new module providing `emitProtocol()`, `installProtocol()`, `uninstallProtocol()` with atomic write semantics and idempotent install.
+- **`--emit-agent-protocol`, `--install-protocol`, `--uninstall-protocol` CLI flags.** Combined setup: `npx agent-token-meter --install-hooks --install-protocol`.
+- **Multi-event hook registration.** `--install-hooks` now registers handlers for `PostToolUse`, `SessionStart`, and `PostCompact` — not just `PostToolUse`. The hook script dispatches on `payload.hook_event_name`.
+- **`SessionStart` bootstrap nudge.** When a new session starts in a project containing a recent `./handoff-*.md`, the hook emits a one-line read-this-first reminder. Fires once per session.
+- **`PostCompact` explicit nudge.** When Claude Code fires the explicit compaction event, the hook emits an immediate fresh-handoff instruction. Suppresses the legacy heuristic detection for 60s to prevent double-firing.
+- **`CREDITS.md`** with full citations for Gary Capps' *The Hidden Constraint in LLM Systems* (May 2026), Liu et al. 2023 (*Lost in the Middle*, arXiv 2307.03172), Hsieh et al. 2024 (*RULER*, arXiv 2404.06654), Modarressi et al. 2025 (*NoLiMa*, arXiv 2502.05167), and an acknowledgment of Anthropic's platform prior art (Claude Code, session JSONL format, hook architecture, prompt caching).
+- **`the-hidden-constraint.md`** shipped as an official reference doc in the npm tarball with the author's permission.
+- **Reasoning-zone bands** on the dashboard. The multiplier line now carries a `[SHARP]`, `[SOFTENING]`, `[DRIFT]`, `[TOLERANCE]`, or `[OVER]` tag derived from `contextPct`, displayed alongside the cost-based multiplier color.
+- **Two-axis phase banner.** Now reads `fill N% (overhead M%)` — exposing both the budget signal (fill) and the drift signal (overhead) without conflating them.
+- **Page-equivalent on the context line.** Shows e.g. `78% · 12 pages [DRIFT]`. Conversion: ~750 tokens/page (mixed prose+code midpoint).
+- **Visual context bar** with zone-tinted fill (30 cells).
+- **`WHAT TO HANDOFF` widget** appears during HANDOFF/RESET phases — a 5-item primer mirroring the protocol's handoff schema.
+- **Post-compaction annotation** in the NOW section (`NOW (post-compaction × 1)`).
+- **Output-vs-input ratio** in the SESSION section with a verbose-agent warning when output exceeds 3% of inputs — surfaces Gary Capps' "generated output competes for the same reasoning budget" insight.
+- **README "Agent Protocol" section** explaining the contract, install commands, and end-to-end workflow.
+- **README "Composing with Claude Code's memory system" appendix** documenting the architectural parallel (within-session handoff vs. across-session memory).
+
+### Changed
+- **Thesis-aligned copy across every customer-facing surface.** The 50/75/90% thresholds are framed as *reasoning-degradation milestones*, not budget alarms. Curation is still cheap at 50%, drift sets in at 75%, attention is degraded and cost is biting at 90%.
+- **Hook nudge strings include the concrete handoff filename** via `${shortId}` substitution. The 90% nudge contains the literal phrase the agent should say to the user.
+- **Compaction nudge** now reads *"Position bias reset to fresh; thresholds re-armed. Write a fresh ./handoff-${shortId}.md now — the auto-summary is a fallback, not a substitute."*
+- **README "Why short sessions win" section** rewritten around the *retrieval reach vs. active reasoning workspace* distinction (from Gary Capps' article). Adds the *output competes for budget* and *dependency density matters* points. Closes with the *competence zone vs. tolerance zone* heuristic.
+- **`IF YOU CLEAR` section** now triggers on cost savings **OR** reasoning-zone DRIFT/TOLERANCE — surfaces guidance even when cost is low but attention is degraded. When attention-triggered, adds a `reasoning DRIFT → SHARP` line.
+- **`installHooks` / `uninstallHooks`** sweep all registered event keys, not just one.
+- **npm package description** rewritten to lead with the value prop instead of a feature list.
+
+### Security
+- **GitHub Actions pinned to commit SHAs.** `ci.yml` and `publish.yml` now reference `actions/checkout` and `actions/setup-node` by their full commit SHA with a version-tag comment, instead of by mutable tag. A compromise of an upstream Action's tag cannot reach our publish workflow until we explicitly review and update the pinned SHA.
+- **Signed git tags for releases.** `CONTRIBUTING.md` documents `npm version --sign-git-tag` as the release-cut convention. Combined with the existing SLSA provenance attestation, releases now have an end-to-end signed chain: maintainer-signed tag → CI verifies tag matches `package.json` → npm publish provenance ties the tarball to the commit. Consumers verify both via `git tag --verify v<x.y.z>` and `npm audit signatures`.
+- **`CODEOWNERS` file added** at `.github/CODEOWNERS` — gives reviewers and supply-chain scanners a verifiable maintainer signal.
+- **`SECURITY.md` expanded** to enumerate every filesystem path the tool reads or writes, with the trigger flag for each write. Out-of-scope writes are now an explicit security bug. The supply-chain hardening section documents the SHA-pin / signed-tag / provenance chain end-to-end.
+
+### Why
+Two threads converged: (1) sharpening the public framing around quadratic cumulative cost and U-shaped attention reasoning degradation, and (2) closing the gap between *agent-readable signal* (already good in v1.3) and *agent-driven workflow* (was missing — agent had to improvise the handoff). v1.4 makes the "AGENT" in agent-token-meter fully earned: the agent receives a protocol document, knows the schema and filename, knows what to tell the human at 90%, and the next session bootstraps from the handoff automatically.
+
+The supply-chain hardening is independent of the agent-protocol work but shipped in the same release because it's small and load-bearing for trust: Socket.dev's supply-chain score, `npm audit signatures` verification, and downstream consumers all benefit from the tighter posture.
+
+No behavior change to read-only telemetry, session-file watching, or the cost-multiplier math. Threshold percentages and compaction-detection heuristics unchanged.
+
 ## [1.2.5] — 2026-04-22
 
 ### Added
@@ -78,6 +121,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Support for Claude Code via `~/.claude/projects/` JSONL logs.
 - `--install-hooks` / `--uninstall-hooks` for in-context threshold nudges at 50/75/90%.
 
+[1.4.0]: https://github.com/albertdobmeyer/agent-token-meter/releases/tag/v1.4.0
 [1.2.5]: https://github.com/albertdobmeyer/agent-token-meter/releases/tag/v1.2.5
 [1.2.4]: https://github.com/albertdobmeyer/agent-token-meter/releases/tag/v1.2.4
 [1.2.3]: https://github.com/albertdobmeyer/agent-token-meter/releases/tag/v1.2.3

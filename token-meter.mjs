@@ -17,6 +17,7 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { fileURLToPath } from "url";
+import * as protocol from "./protocol.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // VERSION is sourced from package.json so a single bump stays in sync
@@ -86,6 +87,7 @@ const EXTERNAL_CONTEXT_LIMITS = {
 const COMPACT_BUFFER = 33_000;
 const HANDOFF_SIZE = 2_000;
 const CLEAR_LOOKAHEAD = 20;
+const OUTPUT_RATIO_WARN = 0.03;     // warn when output > 3% of total inputs (verbose agent)
 const DEFAULT_COMPARE = ["claude-sonnet-4-6", "kimi-k2.5"];
 
 // ── ANSI ──────────────────────────────────────────────────────────────
@@ -99,6 +101,8 @@ const RED = "\x1b[31m";
 const MAGENTA = "\x1b[35m";
 const WHITE = "\x1b[37m";
 const BG_RED = "\x1b[41m";
+const DIM_CYAN = "\x1b[2;36m";
+const BG_WHITE = "\x1b[47m";
 // Render sequence for dashboard refresh. Uses the alt-screen buffer so
 // repeated redraws don't accumulate in terminal scrollback (a default
 // behavior of Windows Terminal that visually duplicated the header
@@ -552,9 +556,31 @@ function sessionShortId(filePath) {
   return base.replace(/\.jsonl$/, "").slice(0, 8);
 }
 
+// Reasoning-zone band derived from contextPct — independent of cost multiplier.
+// Maps the U-shaped attention degradation curve (Liu et al. 2023; RULER; NoLiMa)
+// to context fill percentage. Bands are coarse but defensible for any 1M-window
+// model. For 200k-window models the same bands apply since contextPct is relative.
+function reasoningZone(contextPct) {
+  if (contextPct > 100) return { name: "OVER",       color: BG_RED + WHITE + BOLD, bar: BG_RED + WHITE };
+  if (contextPct > 80)  return { name: "TOLERANCE",  color: RED + BOLD,            bar: RED };
+  if (contextPct > 60)  return { name: "DRIFT",      color: YELLOW + BOLD,         bar: YELLOW };
+  if (contextPct > 35)  return { name: "SOFTENING",  color: CYAN,                  bar: DIM_CYAN };
+  return                        { name: "SHARP",     color: GREEN + BOLD,          bar: GREEN };
+}
+
+// Render a fixed-width context bar with zone-tinted fill.
+// Width is 30 cells so the bar plus trailing percent+pages+tag stays under ~70 chars total.
+function renderContextBar(pct, zone, width = 30) {
+  const filled = Math.max(0, Math.min(width, Math.round((pct / 100) * width)));
+  const empty = width - filled;
+  return zone.bar + "█".repeat(filled) + RESET + DIM + "░".repeat(empty) + RESET;
+}
+
 function buildPhaseBanner(m, cmds) {
   const clearCaps = cmds.clear.replace("/", "").toUpperCase();
-  const pct = m.contextPct.toFixed(0);
+  const fillPct = m.contextPct.toFixed(0);
+  const overheadPct = m.overheadPct.toFixed(0);
+
   const resetFrag = m.overContext
     ? `${RED}${BOLD}reset overdue${m.overdueMs > 60_000 ? ` ${fmtDuration(m.overdueMs)}` : ""}${RESET}`
     : m.turnsToCompact === Infinity
@@ -567,23 +593,24 @@ function buildPhaseBanner(m, cmds) {
             ? `${YELLOW}reset in ~${m.turnsToCompact}${RESET}`
             : `${DIM}reset in ~${m.turnsToCompact}${RESET}`;
 
-  const contextFrag = m.overContext
-    ? `${RED}${BOLD}context ${pct}% OVER${RESET}`
-    : `${DIM}context ${pct}%${RESET}`;
+  // Dual-signal fragment: shows both context fill (budget) and overhead (drift).
+  const signalFrag = m.overContext
+    ? `${RED}${BOLD}fill ${fillPct}% OVER${RESET} ${DIM}(overhead ${overheadPct}%)${RESET}`
+    : `${DIM}fill ${fillPct}% (overhead ${overheadPct}%)${RESET}`;
 
   switch (m.phase.name) {
     case "EXPLORE":
-      return `${GREEN}${BOLD}EXPLORE${RESET} ${DIM}—${RESET} context is cheap · ${contextFrag} · ${resetFrag}`;
+      return `${GREEN}${BOLD}EXPLORE${RESET} ${DIM}—${RESET} context cheap, reasoning sharp · ${signalFrag} · ${resetFrag}`;
     case "BUILD":
-      return `${CYAN}${BOLD}BUILD${RESET} ${DIM}—${RESET} productive zone · ${contextFrag} · ${resetFrag}`;
+      return `${CYAN}${BOLD}BUILD${RESET} ${DIM}—${RESET} productive zone, reasoning sharp · ${signalFrag} · ${resetFrag}`;
     case "HANDOFF":
-      return `${YELLOW}${BOLD}HANDOFF${RESET} ${DIM}—${RESET} plan a handoff file · ${contextFrag} · ${resetFrag}`;
+      return `${YELLOW}${BOLD}HANDOFF${RESET} ${DIM}—${RESET} curate handoff now · ${signalFrag} · ${resetFrag}`;
     case "RESET":
     default: {
       const head = m.overContext
         ? `${RED}${BOLD}⚠ HANDOFF AND ${clearCaps}${RESET}`
         : `${RED}${BOLD}⚠ ${clearCaps}${RESET}`;
-      return `${head} ${DIM}—${RESET} ${contextFrag} · ${resetFrag}`;
+      return `${head} ${DIM}—${RESET} ${signalFrag} · ${resetFrag}`;
     }
   }
 }
@@ -603,17 +630,17 @@ function renderDashboard(metrics, session, rc, profile, hud = {}) {
   else if (m.acceleration < -100) accelArrow = `${GREEN}↓${RESET}`;
   else if (m.turnCount >= 10) accelArrow = `${DIM}=${RESET}`;
 
-  // Multiplier styling — one decimal, color-banded, red bg at ≥5
+  // Multiplier styling — color = cost-multiplier band, suffix [ZONE] tag = reasoning band
   const mc = multColor(m.multiplier);
   const multText = `×${m.multiplier.toFixed(1)}`;
   const multStyled = m.multiplier >= 5
     ? `${BG_RED}${WHITE}${BOLD} ${multText} ${RESET}`
     : `${mc}${BOLD}${multText}${RESET}`;
 
-  // Header — two lines so the project dir never overflows the 60-char
-  // UI width. Line 1: agent identity + version. Line 2: project dir +
-  // short session id (the disambiguation signals). Users match the
-  // project dir eyeball-wise against their terminal's cwd.
+  const zone = reasoningZone(m.contextPct);
+  const zoneTag = `${zone.color}[${zone.name}]${RESET}`;
+
+  // Header
   const shortId = sessionShortId(session?.filePath);
   const projRaw = session?.project || "";
   const proj = projRaw.length > 40 ? "…" + projRaw.slice(-39) : projRaw;
@@ -622,8 +649,6 @@ function renderDashboard(metrics, session, rc, profile, hud = {}) {
     ? ` ${DIM}${[proj, shortId].filter(Boolean).join(" · ")}${RESET}`
     : null;
 
-  // Optional transient notice — rendered at the very bottom so the
-  // numbers above don't shift when it appears or fades out.
   const noticeLine = hud.notice ? ` ${CYAN}${hud.notice}${RESET}` : null;
 
   const W = 60;
@@ -631,21 +656,50 @@ function renderDashboard(metrics, session, rc, profile, hud = {}) {
   const sepLight = `${DIM}${"─".repeat(W)}${RESET}`;
 
   // NOW section
-  const contextPctStr = `${m.contextPct.toFixed(0)}%`;
-  const contextColor = m.overContext ? RED + BOLD : BOLD;
-  const contextLine = ` ${DIM}context${RESET}      ${fmtTokens(m.currentContext)} / ${fmtTokens(m.usableContext)}         ${contextColor}${contextPctStr}${RESET}`;
+  const compactionAnnotation = (m.compactions && m.compactions.length > 0)
+    ? ` ${DIM}(post-compaction × ${m.compactions.length})${RESET}`
+    : "";
+
+  const contextBar = renderContextBar(m.contextPct, zone);
+  const contextLine = ` ${DIM}context${RESET}  ${contextBar}  ${BOLD}${m.contextPct.toFixed(0)}%${RESET} ${zoneTag}`;
   const burnLine = ` ${DIM}burn${RESET}         ${MAGENTA}${m.burnRate >= 0 ? "+" : ""}${Math.round(m.burnRate)}${RESET} ${DIM}tok/call${RESET}${accelArrow ? ` ${accelArrow}` : ""}`;
   const lastTurnLine = ` ${DIM}last turn${RESET}    ${DIM}${fmtTokens(m.lastTurn.contextSize)} in · ${fmtTokens(m.lastTurn.output)} out · ${m.lastTurn.stopReason}${RESET}`;
 
-  // IF YOU CLEAR section — only when there's meaningful savings
+  // IF YOU CLEAR section — triggers on cost savings OR reasoning-zone DRIFT/TOLERANCE/OVER
   const clearCaps = cmds.clear.replace("/", "").toUpperCase();
-  const clearSection = m.savedPerCall > 0.005 ? [
-    sepLight,
-    ` ${DIM}IF YOU ${clearCaps}${RESET}`,
-    ` ${DIM}per call${RESET}     ${GREEN}save ${fmtCost(m.savedPerCall)}${RESET}`,
-    ` ${DIM}next ${CLEAR_LOOKAHEAD}${RESET}      ${GREEN}save ~${fmtCost(m.savingsOverLookahead)}${RESET}`,
-    ` ${DIM}steps${RESET}        ${DIM}write handoff → ${cmds.clear} → reload with plan${RESET}`,
-  ] : null;
+  const attentionTrigger = ["DRIFT", "TOLERANCE", "OVER"].includes(zone.name);
+  const costTrigger = m.savedPerCall > 0.005;
+  const showClearSection = costTrigger || attentionTrigger;
+
+  let clearSection = null;
+  if (showClearSection) {
+    const lines = [
+      sepLight,
+      ` ${DIM}IF YOU ${clearCaps}${RESET}`,
+    ];
+    if (costTrigger) {
+      lines.push(` ${DIM}per call${RESET}     ${GREEN}save ${fmtCost(m.savedPerCall)}${RESET}`);
+    }
+    if (attentionTrigger) {
+      lines.push(` ${DIM}reasoning${RESET}    ${zone.color}${zone.name}${RESET} ${DIM}→${RESET} ${GREEN}${BOLD}SHARP${RESET}`);
+    }
+    if (costTrigger) {
+      lines.push(` ${DIM}next ${CLEAR_LOOKAHEAD}${RESET}      ${GREEN}save ~${fmtCost(m.savingsOverLookahead)}${RESET}`);
+    }
+    lines.push(` ${DIM}steps${RESET}        ${DIM}curate handoff → ${cmds.clear} → reload (lands at position 0)${RESET}`);
+    clearSection = lines;
+  }
+
+  // WHAT TO HANDOFF — one-line schema reminder during HANDOFF/RESET.
+  // The full schema lives in AGENT-PROTOCOL.md; the dashboard just
+  // surfaces the section names so the human knows what to expect.
+  let handoffSection = null;
+  if (m.phase.name === "HANDOFF" || m.phase.name === "RESET") {
+    handoffSection = [
+      sepLight,
+      ` ${DIM}handoff${RESET}      ${DIM}mission · constraints · decisions · open · next · files · avoid${RESET}`,
+    ];
+  }
 
   // SESSION section
   const sessionParts = [`${BOLD}${GREEN}${fmtCost(m.totalCost)}${RESET}`, `${m.userTurnCount} turns`];
@@ -659,6 +713,12 @@ function renderDashboard(metrics, session, rc, profile, hud = {}) {
   cacheParts.push(`${fmtTokens(m.totalOutput)} out`);
   const cacheLine = ` ${DIM}cache${RESET}        ${DIM}${cacheParts.join(" · ")}${RESET}`;
 
+  // Output-ratio line — surfaces "output competes for budget" insight from Gary's article
+  const outputRatio = m.totalBilledInput > 0 ? (m.totalOutput / m.totalBilledInput) : 0;
+  const outputVerbose = outputRatio > OUTPUT_RATIO_WARN;
+  const outputWarn = outputVerbose ? ` ${YELLOW}⚠ verbose${RESET}` : "";
+  const outputLine = ` ${DIM}output${RESET}       ${DIM}${fmtTokens(m.totalOutput)} total · ${(outputRatio * 100).toFixed(1)}% of inputs${RESET}${outputWarn}`;
+
   const altLine = Object.keys(m.comparisons).length > 0
     ? ` ${DIM}alt models${RESET}   ${DIM}${Object.entries(m.comparisons).slice(0, 3).map(([k, v]) => `${providerLabel(k, rc.labels)} ${fmtCost(v)}`).join("   ")}${RESET}`
     : null;
@@ -668,23 +728,25 @@ function renderDashboard(metrics, session, rc, profile, hud = {}) {
     header,
     subHeader,
     sepHeavy,
-    ` ${DIM}MULTIPLIER${RESET}   ${multStyled}${accelArrow ? " " + accelArrow : ""}        ${BOLD}${fmtCost(m.avgCostPerTurn)}${RESET} ${DIM}now${RESET}   ${DIM}${fmtCost(m.baselineCostPerCall)} fresh${RESET}`,
+    ` ${DIM}MULTIPLIER${RESET}   ${multStyled}${accelArrow ? " " + accelArrow : ""} ${zoneTag}   ${BOLD}${fmtCost(m.avgCostPerTurn)}${RESET} ${DIM}now${RESET}   ${DIM}${fmtCost(m.baselineCostPerCall)} fresh${RESET}`,
     ` ${buildPhaseBanner(m, cmds)}`,
     sepHeavy,
-    ` ${DIM}NOW${RESET}`,
+    ` ${DIM}NOW${RESET}${compactionAnnotation}`,
     contextLine,
     burnLine,
     lastTurnLine,
     ...(clearSection || []),
+    ...(handoffSection || []),
     sepLight,
     ` ${DIM}SESSION${RESET}`,
     spendLine,
     cacheLine,
+    outputLine,
     altLine,
     sepHeavy,
-    `${DIM} Watching · Ctrl+C to exit${RESET}`,
+    ` ${DIM}Watching · Ctrl+C to exit${RESET}`,
     noticeLine,
-  ].filter(l => l != null);
+  ].filter(Boolean);
 
   process.stdout.write(CLR_SCR);
   process.stdout.write(lines.join("\n") + "\n");
@@ -756,6 +818,10 @@ ${BOLD}Options:${RESET}
   --limit <n>          Max sessions to show in --all (default: 20)
   --install-hooks      Install threshold hooks (agent-specific)
   --uninstall-hooks    Remove threshold hooks
+  --emit-agent-protocol      Print AGENT-PROTOCOL.md to stdout (for piping)
+  --install-protocol [...]   Install AGENT-PROTOCOL.md in cwd + CLAUDE.md import
+                             (use --no-claude-md to skip CLAUDE.md edit)
+  --uninstall-protocol       Remove AGENT-PROTOCOL.md + CLAUDE.md section
   --help, -h           Show this help
   --version, -v        Show version
 
@@ -773,23 +839,32 @@ ${BOLD}Multi-instance:${RESET}
 
 ${BOLD}Hooks (threshold nudges):${RESET}
   Threshold hooks inject a one-line nudge into the agent's context
-  when your session crosses 50%, 75%, or 90% context fill.
+  when your session crosses a reasoning-degradation boundary:
+    50% — curation still cheap, draft the handoff
+    75% — drift zone, finish the handoff before /clear
+    90% — attention degraded + cost biting, /clear from handoff
   Each fires once. Compaction re-arms them. Zero tokens wasted
   when below thresholds. Currently supported: Claude Code.
+
+  For the full agent contract (handoff schema, exact request-to-clear
+  phrasing, bootstrap protocol), install the bundled AGENT-PROTOCOL.md:
+    npx agent-token-meter --install-protocol
 
   Install:    ${cmd} --install-hooks
   Uninstall:  ${cmd} --uninstall-hooks
 
 ${BOLD}What it shows:${RESET}
-  Context fill bar with percentage
+  Reasoning-zone band [SHARP / SOFTENING / DRIFT / TOLERANCE] alongside cost
+  Context bar with zone-tinted fill + percent + page-equivalent
   Burn rate (tokens/call) with acceleration detection
-  Compaction ETA (estimated calls until auto-compact triggers)
+  Compaction ETA, history, and post-compaction annotation
   Cost tracking with cache efficiency breakdown
+  Output-vs-input ratio with verbose-agent warning
   Multi-provider comparison (same workload on Sonnet, Kimi, etc.)
   Cost per hour and session cost projection
   Cache ROI (net savings from prompt caching)
-  Compaction history (detects when context was compacted)
   Workflow advisor: phase, context tax, ${cmds.clear} savings projection
+  WHAT TO HANDOFF widget during HANDOFF / RESET phases
 
 ${BOLD}Config:${RESET}
   Optional: ${configDir}/token-meter.json
@@ -855,19 +930,22 @@ function installHooks(profile) {
   try { settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")); } catch {}
 
   if (!settings.hooks) settings.hooks = {};
-  if (!settings.hooks[hk.hookEvent]) settings.hooks[hk.hookEvent] = [];
 
-  // Remove any prior token-meter entry so reinstall replaces cleanly
-  settings.hooks[hk.hookEvent] = settings.hooks[hk.hookEvent].filter(
-    h => !isTokenMeterHook(h, hk.hookFileName)
-  );
-
-  // Add hook — use forward slashes for bash compatibility
+  // v1.4: register for multiple events so we can act on SessionStart and PostCompact
+  // explicitly, not just PostToolUse heuristics.
+  const eventsToRegister = ["PostToolUse", "SessionStart", "PostCompact"];
   const hookCmd = `node "${hookDest.replace(/\\/g, "/")}"`;
-  settings.hooks[hk.hookEvent].push({
-    matcher: "",
-    hooks: [{ type: "command", command: hookCmd }],
-  });
+
+  for (const event of eventsToRegister) {
+    if (!settings.hooks[event]) settings.hooks[event] = [];
+    settings.hooks[event] = settings.hooks[event].filter(
+      h => !isTokenMeterHook(h, hk.hookFileName)
+    );
+    settings.hooks[event].push({
+      matcher: "",
+      hooks: [{ type: "command", command: hookCmd }],
+    });
+  }
 
   writeSettingsAtomic(settingsPath, settings);
 
@@ -875,9 +953,9 @@ function installHooks(profile) {
   console.log(`  ${DIM}Hook:${RESET}     ${hookDest}`);
   console.log(`  ${DIM}Config:${RESET}   ${settingsPath}`);
   console.log(`\n  ${profile.name} receives a one-line nudge when context crosses:`);
-  console.log(`    ${YELLOW}50%${RESET}  — plan a handoff point`);
-  console.log(`    ${YELLOW}75%${RESET}  — write findings to file, prepare to ${profile.commands.clear}`);
-  console.log(`    ${RED}90%${RESET}  — ${profile.commands.clear} now (shows context tax $/call)`);
+  console.log(`    ${YELLOW}50%${RESET}  — reasoning still sharp, draft the handoff`);
+  console.log(`    ${YELLOW}75%${RESET}  — drift zone, finish the handoff before ${profile.commands.clear}`);
+  console.log(`    ${RED}90%${RESET}  — attention degraded + cost biting, ${profile.commands.clear} from handoff`);
   console.log(`\n  Each fires ${BOLD}once${RESET} per session. Compaction re-arms them.`);
   console.log(`  To remove: ${CYAN}npx agent-token-meter --uninstall-hooks${RESET}\n`);
 }
@@ -900,11 +978,15 @@ function uninstallHooks(profile) {
   // Remove from settings
   try {
     const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
-    if (settings.hooks?.[hk.hookEvent]) {
-      settings.hooks[hk.hookEvent] = settings.hooks[hk.hookEvent].filter(
-        h => !isTokenMeterHook(h, hk.hookFileName)
-      );
-      if (settings.hooks[hk.hookEvent].length === 0) delete settings.hooks[hk.hookEvent];
+    if (settings.hooks) {
+      // v1.4: remove our entries from every event we may have registered for
+      for (const event of Object.keys(settings.hooks)) {
+        if (!Array.isArray(settings.hooks[event])) continue;
+        settings.hooks[event] = settings.hooks[event].filter(
+          h => !isTokenMeterHook(h, hk.hookFileName)
+        );
+        if (settings.hooks[event].length === 0) delete settings.hooks[event];
+      }
       if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
       writeSettingsAtomic(settingsPath, settings);
     }
@@ -945,6 +1027,46 @@ function main() {
   if (args.includes("--uninstall-hooks")) {
     uninstallHooks(profile);
     return;
+  }
+
+  // ── Agent protocol management (v1.4) ──
+  if (args.includes("--emit-agent-protocol")) {
+    protocol.emitProtocol();
+    process.exit(0);
+  }
+
+  if (args.includes("--install-protocol")) {
+    const skipClaudeMd = args.includes("--no-claude-md");
+    try {
+      const result = protocol.installProtocol({ skipClaudeMd });
+      console.log(`\n${GREEN}✓${RESET} Wrote ${BOLD}AGENT-PROTOCOL.md${RESET} to ${result.protocolPath}`);
+      if (result.claudeMdUpdated) {
+        console.log(`${GREEN}✓${RESET} ${result.claudeMdCreated ? "Created" : "Updated"} CLAUDE.md with protocol import`);
+      } else if (result.claudeMdReason) {
+        console.log(`${DIM}·${RESET} CLAUDE.md unchanged: ${result.claudeMdReason}`);
+      }
+      console.log("");
+    } catch (e) {
+      console.error(`${RED}Install failed:${RESET} ${e.message}`);
+      process.exit(1);
+    }
+    process.exit(0);
+  }
+
+  if (args.includes("--uninstall-protocol")) {
+    try {
+      const result = protocol.uninstallProtocol();
+      if (result.protocolRemoved) console.log(`${GREEN}✓${RESET} Removed AGENT-PROTOCOL.md`);
+      else console.log(`${DIM}·${RESET} AGENT-PROTOCOL.md not present`);
+      if (result.claudeMdRemoved) console.log(`${GREEN}✓${RESET} Removed CLAUDE.md (empty after section removal)`);
+      else if (result.claudeMdUpdated) console.log(`${GREEN}✓${RESET} Removed protocol section from CLAUDE.md`);
+      else console.log(`${DIM}·${RESET} CLAUDE.md unchanged`);
+      console.log("");
+    } catch (e) {
+      console.error(`${RED}Uninstall failed:${RESET} ${e.message}`);
+      process.exit(1);
+    }
+    process.exit(0);
   }
 
   // Parse --project filter
