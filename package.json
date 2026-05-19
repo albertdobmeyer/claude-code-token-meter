@@ -14,8 +14,12 @@
   "files": [
     "token-meter.mjs",
     "hook.mjs",
+    "protocol.mjs",
+    "AGENT-PROTOCOL.md",
     "README.md",
     "CHANGELOG.md",
+    "CREDITS.md",
+    "the-hidden-constraint.md",
     "LICENSE"
   ],
   "keywords": [

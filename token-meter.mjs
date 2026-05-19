@@ -17,6 +17,7 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { fileURLToPath } from "url";
+import * as protocol from "./protocol.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // VERSION is sourced from package.json so a single bump stays in sync
@@ -756,6 +757,10 @@ ${BOLD}Options:${RESET}
   --limit <n>          Max sessions to show in --all (default: 20)
   --install-hooks      Install threshold hooks (agent-specific)
   --uninstall-hooks    Remove threshold hooks
+  --emit-agent-protocol      Print AGENT-PROTOCOL.md to stdout (for piping)
+  --install-protocol [...]   Install AGENT-PROTOCOL.md in cwd + CLAUDE.md import
+                             (use --no-claude-md to skip CLAUDE.md edit)
+  --uninstall-protocol       Remove AGENT-PROTOCOL.md + CLAUDE.md section
   --help, -h           Show this help
   --version, -v        Show version
 
@@ -855,19 +860,22 @@ function installHooks(profile) {
   try { settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")); } catch {}
 
   if (!settings.hooks) settings.hooks = {};
-  if (!settings.hooks[hk.hookEvent]) settings.hooks[hk.hookEvent] = [];
 
-  // Remove any prior token-meter entry so reinstall replaces cleanly
-  settings.hooks[hk.hookEvent] = settings.hooks[hk.hookEvent].filter(
-    h => !isTokenMeterHook(h, hk.hookFileName)
-  );
-
-  // Add hook — use forward slashes for bash compatibility
+  // v1.4: register for multiple events so we can act on SessionStart and PostCompact
+  // explicitly, not just PostToolUse heuristics.
+  const eventsToRegister = ["PostToolUse", "SessionStart", "PostCompact"];
   const hookCmd = `node "${hookDest.replace(/\\/g, "/")}"`;
-  settings.hooks[hk.hookEvent].push({
-    matcher: "",
-    hooks: [{ type: "command", command: hookCmd }],
-  });
+
+  for (const event of eventsToRegister) {
+    if (!settings.hooks[event]) settings.hooks[event] = [];
+    settings.hooks[event] = settings.hooks[event].filter(
+      h => !isTokenMeterHook(h, hk.hookFileName)
+    );
+    settings.hooks[event].push({
+      matcher: "",
+      hooks: [{ type: "command", command: hookCmd }],
+    });
+  }
 
   writeSettingsAtomic(settingsPath, settings);
 
@@ -900,11 +908,15 @@ function uninstallHooks(profile) {
   // Remove from settings
   try {
     const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
-    if (settings.hooks?.[hk.hookEvent]) {
-      settings.hooks[hk.hookEvent] = settings.hooks[hk.hookEvent].filter(
-        h => !isTokenMeterHook(h, hk.hookFileName)
-      );
-      if (settings.hooks[hk.hookEvent].length === 0) delete settings.hooks[hk.hookEvent];
+    if (settings.hooks) {
+      // v1.4: remove our entries from every event we may have registered for
+      for (const event of Object.keys(settings.hooks)) {
+        if (!Array.isArray(settings.hooks[event])) continue;
+        settings.hooks[event] = settings.hooks[event].filter(
+          h => !isTokenMeterHook(h, hk.hookFileName)
+        );
+        if (settings.hooks[event].length === 0) delete settings.hooks[event];
+      }
       if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
       writeSettingsAtomic(settingsPath, settings);
     }
@@ -944,7 +956,47 @@ function main() {
 
   if (args.includes("--uninstall-hooks")) {
     uninstallHooks(profile);
-    return;
+    process.exit(0);
+  }
+
+  // ── Agent protocol management (v1.4) ──
+  if (args.includes("--emit-agent-protocol")) {
+    protocol.emitProtocol();
+    process.exit(0);
+  }
+
+  if (args.includes("--install-protocol")) {
+    const skipClaudeMd = args.includes("--no-claude-md");
+    try {
+      const result = protocol.installProtocol({ skipClaudeMd });
+      console.log(`\n${GREEN}✓${RESET} Wrote ${BOLD}AGENT-PROTOCOL.md${RESET} to ${result.protocolPath}`);
+      if (result.claudeMdUpdated) {
+        console.log(`${GREEN}✓${RESET} ${result.claudeMdCreated ? "Created" : "Updated"} CLAUDE.md with protocol import`);
+      } else if (result.claudeMdReason) {
+        console.log(`${DIM}·${RESET} CLAUDE.md unchanged: ${result.claudeMdReason}`);
+      }
+      console.log("");
+    } catch (e) {
+      console.error(`${RED}Install failed:${RESET} ${e.message}`);
+      process.exit(1);
+    }
+    process.exit(0);
+  }
+
+  if (args.includes("--uninstall-protocol")) {
+    try {
+      const result = protocol.uninstallProtocol();
+      if (result.protocolRemoved) console.log(`${GREEN}✓${RESET} Removed AGENT-PROTOCOL.md`);
+      else console.log(`${DIM}·${RESET} AGENT-PROTOCOL.md not present`);
+      if (result.claudeMdRemoved) console.log(`${GREEN}✓${RESET} Removed CLAUDE.md (empty after section removal)`);
+      else if (result.claudeMdUpdated) console.log(`${GREEN}✓${RESET} Removed protocol section from CLAUDE.md`);
+      else console.log(`${DIM}·${RESET} CLAUDE.md unchanged`);
+      console.log("");
+    } catch (e) {
+      console.error(`${RED}Uninstall failed:${RESET} ${e.message}`);
+      process.exit(1);
+    }
+    process.exit(0);
   }
 
   // Parse --project filter
